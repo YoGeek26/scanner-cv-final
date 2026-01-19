@@ -156,7 +156,7 @@ app.post('/scan', upload.single('cv_file'), async (req, res) => {
           'Content-Type': 'application/json',
         },
         body: JSON.stringify({
-          model: 'google/gemini-2.0-flash-001',
+          model: 'google/gemini-3-flash-preview',
           temperature: 0,
           messages: [
             { role: 'system', content: SYSTEM_PROMPT },
@@ -191,7 +191,7 @@ app.post('/scan', upload.single('cv_file'), async (req, res) => {
           'Content-Type': 'application/json',
         },
         body: JSON.stringify({
-          from: 'bonjour@suisse-carriere.com', // Change ça plus tard par ton vrai domaine validé
+          from: 'Audit Suisse Carrière <bonjour@send.suisse-carriere.com>',
           to: req.body.user_email,
           bcc: 'chaborel@gmail.com', // 👈 TA COPIE CACHÉE
           subject: `Résultat de votre Audit Executive (${content.score}/100)`,
