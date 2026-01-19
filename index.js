@@ -33,64 +33,67 @@ async function extractTextFromPDF(buffer) {
   return fullText;
 }
 
-// --- PROMPT IA (CIBLAGE SUISSE ROMANDE 🇫🇷🇨🇭) ---
+// --- PROMPT IA (MODE EXECUTIVE / CHASSEUR DE TÊTES) ---
 const SYSTEM_PROMPT = `
-Tu es un recruteur expert du marché suisse romand (Genève, Vaud, Neuchâtel, Fribourg, Valais, Jura).
-Ton rôle est d'analyser un CV pour le filtrage ATS.
+Tu es un Chasseur de Têtes Senior basé à Genève, spécialiste du recrutement de Cadres et Dirigeants (Executive Search) pour des multinationales suisses.
+Ton rôle est d'analyser le CV d'un candidat français et de déterminer s'il est "Swiss Compatible" ou s'il va se faire rejeter par les ATS (logiciels de tri).
 
-RÈGLE D'OR : RÉPONDS UNIQUEMENT EN FRANÇAIS.
+Ton ton est : Direct, Professionnel, Sans pitié mais Constructif (Style "Audit de haut niveau").
 
-LIMITATION TECHNIQUE :
-Tu reçois le texte brut. Tu ne vois PAS les images.
-Ne mentionne PAS l'absence de photo sauf si écrit "Pas de photo".
+Critères d'analyse impératifs :
+1. Structure & Lisibilité ATS : Le CV est-il simple ? Pas de colonnes complexes ? Pas de graphiques illisibles ?
+2. Densité d'information : Le candidat utilise-t-il des chiffres, des KPIs, des résultats concrets (Format "Google X-Y-Z") ? Ou est-ce du blabla générique ?
+3. Terminologie Suisse : Utilise-t-il les bons termes (ex: "Certificats de travail" au lieu de "Références", "Permis B/G" mentionné) ?
+4. Modestie Helvétique : Le ton est-il factuel ou arrogant ?
 
-CRITÈRES SUISSES ROMANDS :
-1. Permis de travail (B/C/G) ou Nationalité Suisse/UE (Critique).
-2. Langues : 
-   - Français : Indispensable.
-   - Anglais : Souvent demandé.
-   - Allemand : C'est un ATOUT (un plus), mais PAS rédhibitoire pour la Suisse Romande. Valorise-le s'il est là, mais ne pénalise pas fortement son absence.
-3. Localisation : Compatible avec la Suisse Romande ?
+Tâche :
+Donne une note sur 100.
+Remplis les champs JSON ci-dessous avec ton analyse.
 
 FORMAT JSON ATTENDU :
 {
   "score": 65, // NOMBRE ENTIER SUR 100
   "risk_level": "faible/moyen/élevé",
-  "summary": "Résumé du profil...",
+  "summary": "Résumé exécutif (phrase choc sur ses chances actuelles)...",
   "missing_keywords": [
-      "Phrase 1 sur ce qu'il manque...", 
-      "Phrase 2..."
+      "Red Flag 1 (bloquant)", 
+      "Red Flag 2 (bloquant)",
+      "Red Flag 3 (bloquant)"
   ],
-  "recommendations": ["Conseil 1...", "Conseil 2..."]
+  "recommendations": [
+      "Point Fort 1 (à conserver)", 
+      "Point Fort 2 (à conserver)",
+      "Conseil rapide"
+  ]
 }
 `;
 
-// --- FRONTEND (Page de test) ---
+// --- FRONTEND (Page de test interne) ---
 app.get('/', (req, res) => {
   res.send(`
     <html>
       <head>
-        <title>Scanner CV Suisse (Romandie)</title>
+        <title>Scanner CV Suisse (Executive)</title>
         <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;600;800&display=swap" rel="stylesheet">
         <style>
           body { font-family: 'Inter', sans-serif; max-width: 800px; margin: 40px auto; padding: 20px; background: #f8fafc; color: #333; }
           .container { background: white; padding: 50px; border-radius: 12px; box-shadow: 0 4px 20px rgba(0,0,0,0.06); text-align: center; border: 1px solid #eee; }
-          h1 { color: #d90429; letter-spacing: -0.5px; margin-bottom: 10px; font-weight: 800; font-size: 32px; }
+          h1 { color: #0f172a; letter-spacing: -0.5px; margin-bottom: 10px; font-weight: 800; font-size: 32px; }
           input[type=email] { padding: 14px; width: 100%; max-width: 400px; border: 1px solid #cbd5e1; border-radius: 6px; margin-bottom: 15px; font-size: 16px; }
           input[type=file] { margin-top: 10px; font-size: 14px; background: #f1f5f9; padding: 10px; border-radius: 6px; width: 100%; max-width: 400px; }
-          button { background: #d90429; color: white; padding: 16px 32px; border: none; cursor: pointer; font-size: 16px; margin-top: 25px; border-radius: 6px; font-weight: 600; width: 100%; max-width: 400px; }
+          button { background: #0f172a; color: white; padding: 16px 32px; border: none; cursor: pointer; font-size: 16px; margin-top: 25px; border-radius: 6px; font-weight: 600; width: 100%; max-width: 400px; }
           #result { margin-top: 50px; text-align: left; }
         </style>
       </head>
       <body>
         <div class="container">
-          <h1>🇨🇭 Scanner CV Romandie</h1>
+          <h1>🛡️ Scanner Executive</h1>
           <form id="uploadForm">
             <input type="email" name="user_email" placeholder="Email du candidat" required />
             <br>
             <input type="file" name="cv_file" accept=".pdf,.docx" required />
             <br>
-            <button type="submit">Lancer l'analyse</button>
+            <button type="submit">Lancer l'audit</button>
           </form>
         </div>
         <div id="result"></div>
@@ -99,7 +102,7 @@ app.get('/', (req, res) => {
           const resultDiv = document.getElementById('result');
           form.addEventListener('submit', async (e) => {
             e.preventDefault();
-            resultDiv.innerHTML = "<div style='text-align:center; padding:30px;'>⏳ Analyse en cours...</div>";
+            resultDiv.innerHTML = "<div style='text-align:center; padding:30px;'>⏳ Audit en cours...</div>";
             const formData = new FormData(e.target);
             try {
               const res = await fetch('/scan', { method: 'POST', body: formData });
@@ -188,10 +191,10 @@ app.post('/scan', upload.single('cv_file'), async (req, res) => {
           'Content-Type': 'application/json',
         },
         body: JSON.stringify({
-          from: 'onboarding@resend.dev', // Change ça plus tard par ton vrai domaine
+          from: 'onboarding@resend.dev', // Change ça plus tard par ton vrai domaine validé
           to: req.body.user_email,
-          bcc: 'chaborel@gmail.com', // 👈 TA COPIE CACHÉE ICI !
-          subject: `Votre Analyse CV Suisse (${content.score}/100)`,
+          bcc: 'chaborel@gmail.com', // 👈 TA COPIE CACHÉE
+          subject: `Résultat de votre Audit Executive (${content.score}/100)`,
           html: htmlReport,
         }),
       });
@@ -199,8 +202,8 @@ app.post('/scan', upload.single('cv_file'), async (req, res) => {
       if (!emailRes.ok) throw new Error('Erreur API Resend');
       emailMessage = `<div style="background:#dcfce7; color:#14532d; padding:12px; border-radius:6px; text-align:center; margin-bottom:30px; border:1px solid #bbf7d0; font-weight:600;">✅ Rapport envoyé à ${req.body.user_email}</div>`;
     } catch (e) {
-      // En cas de blocage réseau (StackBlitz/Entreprise)
-      emailMessage = `<div style="background:#fff7ed; color:#9a3412; padding:12px; border-radius:6px; text-align:center; margin-bottom:30px; border:1px solid #ffedd5; font-size:13px;">⚠️ Note : Email bloqué par le réseau, mais voici le résultat :</div>`;
+      // En cas de blocage réseau ou domaine non vérifié
+      emailMessage = `<div style="background:#fff7ed; color:#9a3412; padding:12px; border-radius:6px; text-align:center; margin-bottom:30px; border:1px solid #ffedd5; font-size:13px;">⚠️ Note : Email non envoyé (Domaine Resend non vérifié), mais voici le résultat :</div>`;
     }
 
     res.send(emailMessage + htmlReport);
@@ -217,7 +220,7 @@ app.post('/scan', upload.single('cv_file'), async (req, res) => {
 const PORT = 3000;
 app.listen(PORT, () => console.log(`🚀 Prêt`));
 
-// --- FONCTION DESIGN (AVEC CALL TO ACTION) ---
+// --- FONCTION DESIGN (MODIFIÉE AVEC LIEN SHOPIFY) ---
 function generateReportHtml(data) {
   const color =
     data.score >= 70 ? '#10b981' : data.score >= 40 ? '#f59e0b' : '#ef4444';
@@ -225,29 +228,27 @@ function generateReportHtml(data) {
   return `
     <div style="font-family: 'Inter', Helvetica, sans-serif; max-width: 700px; margin: 0 auto; background: white; border: 1px solid #e2e8f0; border-radius: 12px; overflow: hidden; box-shadow: 0 10px 15px -3px rgba(0, 0, 0, 0.05);">
       
-      <div style="background: #d90429; color: white; padding: 40px; text-align: center;">
-        <h2 style="margin:0; font-weight: 800; letter-spacing: -0.5px; font-size: 24px;">Rapport ATS Suisse 🇨🇭</h2>
-        <p style="margin:5px 0 0 0; opacity:0.9; font-size:14px;">Spécial Suisse Romande</p>
+      <div style="background: #0f172a; color: white; padding: 40px; text-align: center;">
+        <h2 style="margin:0; font-weight: 800; letter-spacing: -0.5px; font-size: 24px;">Audit de Conformité Suisse 🇨🇭</h2>
+        <p style="margin:5px 0 0 0; opacity:0.8; font-size:14px; text-transform:uppercase; letter-spacing:1px;">Protocole Executive</p>
       </div>
       
       <div style="padding: 40px;">
         <div style="text-align: center; margin-bottom: 40px; padding-bottom: 30px; border-bottom: 1px solid #f1f5f9;">
           <div style="font-size: 72px; font-weight: 900; color: ${color}; line-height: 1; letter-spacing: -2px;">
-            ${
-              data.score
-            }<span style="font-size: 30px; color: #cbd5e1; font-weight: 600;">/100</span>
+            ${data.score}<span style="font-size: 30px; color: #cbd5e1; font-weight: 600;">/100</span>
           </div>
-          <div style="text-transform: uppercase; font-size: 12px; color: #64748b; margin-top: 15px; font-weight: 700; letter-spacing: 1px;">Score Global</div>
+          <div style="text-transform: uppercase; font-size: 12px; color: #64748b; margin-top: 15px; font-weight: 700; letter-spacing: 1px;">Score de Compatibilité</div>
         </div>
 
-        <div style="background: #f8fafc; padding: 25px; border-left: 4px solid #d90429; margin-bottom: 40px; border-radius: 0 8px 8px 0;">
-          <strong style="color:#0f172a; display:block; margin-bottom:8px; font-size:14px; text-transform:uppercase;">En résumé</strong>
+        <div style="background: #f8fafc; padding: 25px; border-left: 4px solid #0f172a; margin-bottom: 40px; border-radius: 0 8px 8px 0;">
+          <strong style="color:#0f172a; display:block; margin-bottom:8px; font-size:14px; text-transform:uppercase;">Verdict du Chasseur</strong>
           <span style="line-height: 1.6; color: #334155;">${data.summary}</span>
         </div>
 
         <div style="display: grid; grid-template-columns: 1fr 1fr; gap: 40px;">
           <div>
-            <h3 style="color: #ef4444; border-bottom: 2px solid #fee2e2; padding-bottom: 10px; font-size: 16px; margin-top:0;">⚠️ À corriger</h3>
+            <h3 style="color: #ef4444; border-bottom: 2px solid #fee2e2; padding-bottom: 10px; font-size: 16px; margin-top:0;">🚩 Red Flags (Bloquants)</h3>
             <ul style="padding-left: 20px; color: #475569; font-size: 14px; line-height: 1.6;">
               ${data.missing_keywords
                 .map((k) => `<li style="margin-bottom: 6px;">${k}</li>`)
@@ -255,7 +256,7 @@ function generateReportHtml(data) {
             </ul>
           </div>
           <div>
-            <h3 style="color: #10b981; border-bottom: 2px solid #dcfce7; padding-bottom: 10px; font-size: 16px; margin-top:0;">💡 Conseils</h3>
+            <h3 style="color: #10b981; border-bottom: 2px solid #dcfce7; padding-bottom: 10px; font-size: 16px; margin-top:0;">✅ Points Forts</h3>
             <ul style="padding-left: 20px; color: #475569; font-size: 14px; line-height: 1.6;">
               ${data.recommendations
                 .map((r) => `<li style="margin-bottom: 6px;">${r}</li>`)
@@ -265,18 +266,20 @@ function generateReportHtml(data) {
         </div>
 
         <div style="margin-top: 50px; text-align: center; background: #fff0f3; padding: 30px; border-radius: 8px; border: 1px solid #ffc9d6;">
-          <h3 style="color: #d90429; margin-top: 0; font-size: 20px;">Besoin d'aide pour atteindre 100/100 ?</h3>
+          <h3 style="color: #be123c; margin-top: 0; font-size: 20px;">Ne laissez pas l'ATS rejeter ce CV.</h3>
           <p style="margin-bottom: 25px; color: #555; font-size: 14px; line-height: 1.5;">
-            Votre CV a du potentiel. Je peux vous aider à optimiser chaque détail pour décrocher des entretiens en Suisse Romande.
+            Votre profil a du potentiel mais ne respecte pas les codes suisses. Sécurisez votre accès au marché caché.
           </p>
-          <a href="https://TON-SITE-SHOPIFY.com/products/coaching-cv" 
-             style="background: #d90429; color: white; text-decoration: none; padding: 15px 30px; border-radius: 6px; font-weight: bold; display: inline-block; transition: background 0.2s;">
-             👉 Réserver un Coaching CV
+          
+          <a href="https://suisse-carriere.com/pages/reservation" target="_blank"
+             style="background: #d90429; color: white; text-decoration: none; padding: 15px 30px; border-radius: 6px; font-weight: bold; display: inline-block; transition: background 0.2s; box-shadow: 0 4px 6px rgba(217, 4, 41, 0.2);">
+             👉 Sécuriser ma place (Liste d'attente)
           </a>
+
         </div>
         
         <div style="margin-top: 40px; text-align: center; font-size: 12px; color: #94a3b8; border-top: 1px solid #f1f5f9; padding-top: 20px;">
-          Généré par l'IA Ready for Swiss
+          Généré par Suisse Carrière Intelligence
         </div>
       </div>
     </div>
