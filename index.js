@@ -191,7 +191,7 @@ app.post('/scan', upload.single('cv_file'), async (req, res) => {
           'Content-Type': 'application/json',
         },
         body: JSON.stringify({
-          from: 'Audit Suisse Carrière <bonjour@send.suisse-carriere.com>',
+          from: 'Audit Suisse Carrière <bonjour@suisse-carriere.com>',
           to: req.body.user_email,
           bcc: 'chaborel@gmail.com', // 👈 TA COPIE CACHÉE
           subject: `Résultat de votre Audit Executive (${content.score}/100)`,
