@@ -219,7 +219,7 @@ app.post('/scan', upload.single('cv_file'), async (req, res) => {
           'Content-Type': 'application/json',
         },
         body: JSON.stringify({
-         model: 'google/gemini-3-flash-preview
+         model: 'google/gemini-3-flash-preview'
           temperature: 0,
           messages: [
             { role: 'system', content: SYSTEM_PROMPT },
