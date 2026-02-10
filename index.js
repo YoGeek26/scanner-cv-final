@@ -233,16 +233,11 @@ app.get('/', (req, res) => {
             const formData = new FormData(e.target);
             try {
               const res = await fetch('/scan', { method: 'POST', body: formData });
-              const data = await res.json();
+              const htmlContent = await res.text();
               clearInterval(interval);
               loader.style.display = "none";
               btn.style.display = "inline-block";
-              // Afficher le rapport HTML
-              resultDiv.innerHTML = (data.email_status || '') + data.report;
-              // Afficher les données extraites en dessous (mode debug)
-              if (data.extracted_data) {
-                resultDiv.innerHTML += '<details style="margin-top:30px;background:#f8fafc;padding:20px;border-radius:8px;border:1px solid #e2e8f0;"><summary style="cursor:pointer;font-weight:700;color:#0f172a;">📋 Données extraites (debug)</summary><pre style="margin-top:12px;font-size:12px;overflow-x:auto;color:#334155;">' + JSON.stringify(data.extracted_data, null, 2) + '</pre></details>';
-              }
+              resultDiv.innerHTML = htmlContent;
               resultDiv.scrollIntoView({ behavior: 'smooth', block: 'start' });
             } catch (err) {
               clearInterval(interval);
@@ -273,8 +268,17 @@ app.get('/', (req, res) => {
 // }
 // ═══════════════════════════════════════════════════════════════
 app.post('/scan', upload.single('cv_file'), async (req, res) => {
+  // ─── FORMAT DE RÉPONSE ───
+  // Par défaut : HTML (rétrocompatible avec le frontend Shopify existant)
+  // Si ?format=json ou header Accept: application/json → JSON (pour le dashboard)
+  const wantJson = req.query.format === 'json'
+    || (req.headers.accept && req.headers.accept.includes('application/json'));
+
   try {
-    if (!req.file) return res.status(400).json({ error: 'Fichier manquant' });
+    if (!req.file) {
+      if (wantJson) return res.status(400).json({ error: 'Fichier manquant' });
+      return res.status(400).send('Fichier manquant');
+    }
 
     let text = '';
     console.log('📂 Fichier reçu :', req.file.mimetype);
@@ -290,11 +294,13 @@ app.post('/scan', upload.single('cv_file'), async (req, res) => {
       const result = await mammoth.extractRawText({ buffer: req.file.buffer });
       text = result.value;
     } else {
-      return res.status(400).json({ error: 'Format non supporté (PDF ou DOCX uniquement)' });
+      if (wantJson) return res.status(400).json({ error: 'Format non supporté (PDF ou DOCX uniquement)' });
+      return res.status(400).send('Format non supporté (PDF ou DOCX uniquement)');
     }
 
     if (!text || text.length < 20) {
-      return res.status(400).json({ error: 'Fichier illisible ou trop court.' });
+      if (wantJson) return res.status(400).json({ error: 'Fichier illisible ou trop court.' });
+      return res.status(400).send('Fichier illisible.');
     }
 
     console.log(`📝 Texte extrait : ${text.length} caractères`);
@@ -324,7 +330,6 @@ app.post('/scan', upload.single('cv_file'), async (req, res) => {
     let content;
     try {
       const raw = aiJson.choices[0].message.content;
-      // Nettoyer d'éventuels ```json ... ``` autour
       const cleaned = raw.replace(/^```json\s*/i, '').replace(/\s*```$/i, '').trim();
       content = JSON.parse(cleaned);
     } catch (parseErr) {
@@ -338,10 +343,9 @@ app.post('/scan', upload.single('cv_file'), async (req, res) => {
 
     // Valider/nettoyer extracted_data
     const extracted = content.extracted_data || {};
-    
+
     // S'assurer que les champs critiques ont un format cohérent
     if (extracted.metier && !['AS', 'IDE', 'IADE', 'IBODE', 'SF', 'TECH', 'CADRE_SANTE', 'EXECUTIVE', 'AUTRE'].includes(extracted.metier)) {
-      // Tenter de mapper des variantes courantes
       const metierMap = {
         'INFIRMIER': 'IDE', 'INFIRMIERE': 'IDE', 'INFIRMIÈRE': 'IDE',
         'AIDE-SOIGNANT': 'AS', 'AIDE-SOIGNANTE': 'AS', 'AIDE SOIGNANT': 'AS',
@@ -366,7 +370,7 @@ app.post('/scan', upload.single('cv_file'), async (req, res) => {
     // --- Générer le rapport HTML ---
     const htmlReport = generateReportHtml(content);
 
-    // --- Envoi email (optionnel, comme avant) ---
+    // --- Envoi email (optionnel) ---
     let emailStatus = '';
     if (req.body.user_email) {
       try {
@@ -391,24 +395,33 @@ app.post('/scan', upload.single('cv_file'), async (req, res) => {
       }
     }
 
-    // --- Réponse JSON structurée ---
-    res.json({
-      report: htmlReport,
-      extracted_data: extracted,
-      score: content.score,
-      detected_profile: content.detected_profile || null,
-      summary: content.summary || null,
-      missing_keywords: content.missing_keywords || [],
-      recommendations: content.recommendations || [],
-      email_status: emailStatus,
-    });
+    // ─── RÉPONSE ───
+    if (wantJson) {
+      // Dashboard / API : réponse JSON complète avec extracted_data
+      return res.json({
+        report: htmlReport,
+        extracted_data: extracted,
+        score: content.score,
+        detected_profile: content.detected_profile || null,
+        summary: content.summary || null,
+        missing_keywords: content.missing_keywords || [],
+        recommendations: content.recommendations || [],
+        email_status: emailStatus,
+      });
+    }
+
+    // Shopify / Frontend existant : réponse HTML directe (comme avant)
+    res.send(emailStatus + htmlReport);
 
   } catch (error) {
     console.error('❌ Erreur Backend:', error);
-    res.status(500).json({
-      error: error.message,
-      report: `<div style="color:red; text-align:center; padding:20px;">Erreur technique : ${error.message}</div>`,
-    });
+    if (wantJson) {
+      return res.status(500).json({
+        error: error.message,
+        report: `<div style="color:red; text-align:center; padding:20px;">Erreur technique : ${error.message}</div>`,
+      });
+    }
+    res.status(500).send(`<div style="color:red; text-align:center; padding:20px;">Erreur technique : ${error.message}</div>`);
   }
 });
 
