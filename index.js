@@ -370,7 +370,7 @@ app.post('/scan', upload.single('cv_file'), async (req, res) => {
     // --- Générer le rapport HTML ---
     const htmlReport = generateReportHtml(content);
 
-    // --- Envoi email (optionnel) ---
+    // --- Email 1 : Rapport au candidat (propre, sans données extraites) ---
     let emailStatus = '';
     if (req.body.user_email) {
       try {
@@ -383,7 +383,6 @@ app.post('/scan', upload.single('cv_file'), async (req, res) => {
           body: JSON.stringify({
             from: 'Audit Suisse Carrière <bonjour@suisse-carriere.com>',
             to: req.body.user_email,
-            bcc: 'chaborel@gmail.com',
             subject: `Résultat de votre Audit (${content.score}/100)`,
             html: htmlReport,
           }),
@@ -393,6 +392,28 @@ app.post('/scan', upload.single('cv_file'), async (req, res) => {
       } catch (e) {
         emailStatus = `<div style="background:#fff7ed; color:#9a3412; padding:12px; border-radius:6px; text-align:center; margin-bottom:30px; border:1px solid #ffedd5; font-size:13px;">⚠️ Note : Email non envoyé (vérification domaine requise), mais voici le résultat :</div>`;
       }
+    }
+
+    // --- Email 2 : Fiche profil ADMIN (données extraites → toi) ---
+    try {
+      const adminHtml = generateAdminFicheHtml(extracted, content, req.body.user_email);
+      await fetch('https://api.resend.com/emails', {
+        method: 'POST',
+        headers: {
+          Authorization: `Bearer ${process.env.RESEND_API_KEY}`,
+          'Content-Type': 'application/json',
+        },
+        body: JSON.stringify({
+          from: 'Scanner CV <bonjour@suisse-carriere.com>',
+          to: process.env.ADMIN_EMAIL || 'chaborel@gmail.com',
+          subject: `🆕 Profil extrait : ${extracted.nom || 'Inconnu'} — ${extracted.metier || '?'} — ${content.score}/100`,
+          html: adminHtml,
+        }),
+      });
+      console.log('📧 Fiche admin envoyée pour:', extracted.nom);
+    } catch (e) {
+      console.error('⚠️ Email admin non envoyé:', e.message);
+      // On ne bloque pas la réponse si l'email admin échoue
     }
 
     // ─── RÉPONSE ───
@@ -624,21 +645,6 @@ function generateReportHtml(data) {
   const color = data.score >= 70 ? '#10b981' : data.score >= 40 ? '#f59e0b' : '#ef4444';
   const redFlags = data.missing_keywords || ['Aucun point bloquant majeur détecté.'];
   const greenPoints = data.recommendations || ['Profil globalement intéressant.'];
-  const extracted = data.extracted_data || {};
-
-  // Bandeau résumé des données extraites (nouveau)
-  const extractedBanner = extracted.nom ? `
-    <div style="background: #f0f9ff; border: 1px solid #bae6fd; border-radius: 8px; padding: 20px; margin-bottom: 30px;">
-      <div style="font-weight: 700; color: #0c4a6e; margin-bottom: 10px; font-size: 14px;">📋 Données extraites de votre CV</div>
-      <div style="display: grid; grid-template-columns: 1fr 1fr; gap: 8px; font-size: 13px; color: #334155;">
-        <div><strong>Nom :</strong> ${extracted.nom || '—'}</div>
-        <div><strong>Métier :</strong> ${extracted.metier || '—'}</div>
-        <div><strong>Expérience :</strong> ${extracted.experience_annees ? extracted.experience_annees + ' ans' : '—'}</div>
-        <div><strong>CRS :</strong> ${extracted.statut_crs === 'obtenue' ? '✅ Obtenue' : extracted.statut_crs === 'en_cours' ? '⏳ En cours' : '❌ Non mentionnée'}</div>
-        ${extracted.specialites && extracted.specialites.length ? `<div style="grid-column: span 2;"><strong>Spécialités :</strong> ${extracted.specialites.join(', ')}</div>` : ''}
-      </div>
-    </div>
-  ` : '';
 
   return `
     <div style="font-family: 'Inter', Helvetica, sans-serif; max-width: 700px; margin: 0 auto; background: white; border: 1px solid #e2e8f0; border-radius: 12px; overflow: hidden; box-shadow: 0 10px 15px -3px rgba(0, 0, 0, 0.05);">
@@ -653,7 +659,6 @@ function generateReportHtml(data) {
           </div>
           <div style="text-transform: uppercase; font-size: 12px; color: #64748b; margin-top: 15px; font-weight: 700; letter-spacing: 1px;">Score de Compatibilité</div>
         </div>
-        ${extractedBanner}
         <div style="background: #f8fafc; padding: 25px; border-left: 4px solid #0f172a; margin-bottom: 40px; border-radius: 0 8px 8px 0;">
           <strong style="color:#0f172a; display:block; margin-bottom:8px; font-size:14px; text-transform:uppercase;">Verdict de l'IA</strong>
           <span style="line-height: 1.6; color: #334155;">${data.summary}</span>
@@ -684,6 +689,151 @@ function generateReportHtml(data) {
         </div>
         <div style="margin-top: 40px; text-align: center; font-size: 12px; color: #94a3b8; border-top: 1px solid #f1f5f9; padding-top: 20px;">
           Généré par Suisse Carrière Intelligence v2
+        </div>
+      </div>
+    </div>
+  `;
+}
+
+// ═══════════════════════════════════════════════════════════════
+// FICHE PROFIL ADMIN (email envoyé à toi uniquement)
+// ═══════════════════════════════════════════════════════════════
+function generateAdminFicheHtml(extracted, auditData, candidatEmail) {
+  const e = extracted || {};
+  const score = auditData.score || 0;
+  const scoreColor = score >= 70 ? '#10b981' : score >= 40 ? '#f59e0b' : '#ef4444';
+
+  const metierLabels = {
+    AS: 'Aide-Soignant(e)', IDE: 'Infirmier(e) DE', IADE: 'IADE', IBODE: 'IBODE',
+    SF: 'Sage-Femme', TECH: 'Technicien(ne)', CADRE_SANTE: 'Cadre de Santé',
+    EXECUTIVE: 'Executive', AUTRE: 'Autre'
+  };
+
+  const crsDisplay = e.statut_crs === 'obtenue'
+    ? '<span style="color:#10b981;font-weight:700;">✅ Obtenue</span>'
+    : e.statut_crs === 'en_cours'
+    ? '<span style="color:#f59e0b;font-weight:700;">⏳ En cours</span>'
+    : '<span style="color:#ef4444;font-weight:700;">❌ Non mentionnée</span>';
+
+  const employeursHtml = (e.employeurs && e.employeurs.length)
+    ? e.employeurs.map(emp =>
+        `<tr>
+          <td style="padding:8px 12px;border-bottom:1px solid #f1f5f9;font-size:13px;">${emp.poste || '—'}</td>
+          <td style="padding:8px 12px;border-bottom:1px solid #f1f5f9;font-size:13px;">${emp.nom || '—'}</td>
+          <td style="padding:8px 12px;border-bottom:1px solid #f1f5f9;font-size:13px;">${emp.service || '—'}</td>
+          <td style="padding:8px 12px;border-bottom:1px solid #f1f5f9;font-size:13px;">${emp.debut || '?'} → ${emp.fin || '?'}</td>
+        </tr>`
+      ).join('')
+    : '<tr><td colspan="4" style="padding:8px 12px;color:#94a3b8;font-size:13px;">Aucun poste extrait</td></tr>';
+
+  return `
+    <div style="font-family:'Inter',Helvetica,sans-serif;max-width:700px;margin:0 auto;background:white;">
+      <!-- EN-TÊTE -->
+      <div style="background:#0f172a;color:white;padding:30px;text-align:center;">
+        <h1 style="margin:0;font-size:20px;font-weight:800;">🆕 Nouveau Profil Extrait</h1>
+        <p style="margin:8px 0 0;opacity:0.7;font-size:13px;">${new Date().toLocaleDateString('fr-FR', { weekday: 'long', year: 'numeric', month: 'long', day: 'numeric', hour: '2-digit', minute: '2-digit' })}</p>
+      </div>
+
+      <div style="padding:30px;">
+        <!-- SCORE + IDENTITÉ -->
+        <div style="display:flex;gap:24px;margin-bottom:30px;align-items:center;">
+          <div style="text-align:center;flex-shrink:0;">
+            <div style="font-size:48px;font-weight:900;color:${scoreColor};line-height:1;">${score}</div>
+            <div style="font-size:11px;color:#94a3b8;text-transform:uppercase;font-weight:700;">/100</div>
+          </div>
+          <div style="flex:1;">
+            <div style="font-size:22px;font-weight:800;color:#0f172a;margin-bottom:4px;">${e.nom || 'Nom inconnu'}</div>
+            <div style="font-size:15px;color:#475569;margin-bottom:8px;">${metierLabels[e.metier] || e.metier || '—'} — ${e.experience_annees ? e.experience_annees + ' ans d\'exp.' : 'Exp. inconnue'}</div>
+            <div style="display:flex;gap:12px;flex-wrap:wrap;">
+              ${e.email ? `<span style="font-size:12px;background:#f1f5f9;padding:4px 10px;border-radius:4px;">📧 ${e.email}</span>` : ''}
+              ${e.telephone ? `<span style="font-size:12px;background:#f1f5f9;padding:4px 10px;border-radius:4px;">📱 ${e.telephone}</span>` : ''}
+              ${e.ville_actuelle ? `<span style="font-size:12px;background:#f1f5f9;padding:4px 10px;border-radius:4px;">📍 ${e.ville_actuelle}${e.departement ? ' (' + e.departement + ')' : ''}</span>` : ''}
+            </div>
+          </div>
+        </div>
+
+        <!-- INFOS CLÉS -->
+        <table style="width:100%;border-collapse:collapse;margin-bottom:24px;background:#f8fafc;border-radius:8px;overflow:hidden;">
+          <tr>
+            <td style="padding:12px 16px;font-size:13px;font-weight:700;color:#64748b;width:40%;border-bottom:1px solid #e2e8f0;">Diplôme</td>
+            <td style="padding:12px 16px;font-size:13px;border-bottom:1px solid #e2e8f0;">${e.diplome_principal || '—'}${e.annee_diplome ? ' (' + e.annee_diplome + ')' : ''}</td>
+          </tr>
+          <tr>
+            <td style="padding:12px 16px;font-size:13px;font-weight:700;color:#64748b;border-bottom:1px solid #e2e8f0;">Reconnaissance CRS</td>
+            <td style="padding:12px 16px;font-size:13px;border-bottom:1px solid #e2e8f0;">${crsDisplay}</td>
+          </tr>
+          <tr>
+            <td style="padding:12px 16px;font-size:13px;font-weight:700;color:#64748b;border-bottom:1px solid #e2e8f0;">Spécialités</td>
+            <td style="padding:12px 16px;font-size:13px;border-bottom:1px solid #e2e8f0;">${e.specialites && e.specialites.length ? e.specialites.join(', ') : '—'}</td>
+          </tr>
+          <tr>
+            <td style="padding:12px 16px;font-size:13px;font-weight:700;color:#64748b;border-bottom:1px solid #e2e8f0;">Services</td>
+            <td style="padding:12px 16px;font-size:13px;border-bottom:1px solid #e2e8f0;">${e.services && e.services.length ? e.services.join(', ') : '—'}</td>
+          </tr>
+          <tr>
+            <td style="padding:12px 16px;font-size:13px;font-weight:700;color:#64748b;border-bottom:1px solid #e2e8f0;">Langues</td>
+            <td style="padding:12px 16px;font-size:13px;border-bottom:1px solid #e2e8f0;">${e.langues && e.langues.length ? e.langues.join(', ') : '—'}</td>
+          </tr>
+          <tr>
+            <td style="padding:12px 16px;font-size:13px;font-weight:700;color:#64748b;border-bottom:1px solid #e2e8f0;">Formations comp.</td>
+            <td style="padding:12px 16px;font-size:13px;border-bottom:1px solid #e2e8f0;">${e.formations_complementaires && e.formations_complementaires.length ? e.formations_complementaires.join(', ') : '—'}</td>
+          </tr>
+          <tr>
+            <td style="padding:12px 16px;font-size:13px;font-weight:700;color:#64748b;border-bottom:1px solid #e2e8f0;">Disponibilité</td>
+            <td style="padding:12px 16px;font-size:13px;border-bottom:1px solid #e2e8f0;">${e.disponibilite || '—'}</td>
+          </tr>
+          <tr>
+            <td style="padding:12px 16px;font-size:13px;font-weight:700;color:#64748b;">Qualité CV</td>
+            <td style="padding:12px 16px;font-size:13px;">Photo: ${e.a_photo ? '✅' : '❌'} | Réf: ${e.references_mentionnees ? '✅' : '❌'} | ~${e.nombre_pages_estime || '?'} page(s)</td>
+          </tr>
+        </table>
+
+        <!-- PARCOURS -->
+        <h3 style="font-size:14px;font-weight:800;color:#0f172a;text-transform:uppercase;margin-bottom:12px;">📋 Parcours professionnel</h3>
+        <table style="width:100%;border-collapse:collapse;margin-bottom:24px;">
+          <thead>
+            <tr style="background:#f1f5f9;">
+              <th style="padding:8px 12px;text-align:left;font-size:12px;font-weight:700;color:#64748b;">Poste</th>
+              <th style="padding:8px 12px;text-align:left;font-size:12px;font-weight:700;color:#64748b;">Établissement</th>
+              <th style="padding:8px 12px;text-align:left;font-size:12px;font-weight:700;color:#64748b;">Service</th>
+              <th style="padding:8px 12px;text-align:left;font-size:12px;font-weight:700;color:#64748b;">Période</th>
+            </tr>
+          </thead>
+          <tbody>${employeursHtml}</tbody>
+        </table>
+
+        <!-- VERDICT IA -->
+        <div style="background:#fffbeb;border:1px solid #fde68a;border-radius:8px;padding:16px;margin-bottom:24px;">
+          <div style="font-weight:700;font-size:13px;color:#92400e;margin-bottom:6px;">🤖 Verdict IA</div>
+          <p style="font-size:13px;color:#78350f;margin:0;line-height:1.5;">${auditData.summary || '—'}</p>
+        </div>
+
+        <!-- RED FLAGS / GREEN -->
+        <div style="display:grid;grid-template-columns:1fr 1fr;gap:20px;margin-bottom:24px;">
+          <div>
+            <div style="font-weight:700;font-size:12px;color:#ef4444;margin-bottom:8px;">🚩 RED FLAGS</div>
+            <ul style="margin:0;padding-left:16px;font-size:12px;color:#475569;line-height:1.8;">
+              ${(auditData.missing_keywords || []).map(k => `<li>${k}</li>`).join('')}
+            </ul>
+          </div>
+          <div>
+            <div style="font-weight:700;font-size:12px;color:#10b981;margin-bottom:8px;">✅ POINTS FORTS</div>
+            <ul style="margin:0;padding-left:16px;font-size:12px;color:#475569;line-height:1.8;">
+              ${(auditData.recommendations || []).map(r => `<li>${r}</li>`).join('')}
+            </ul>
+          </div>
+        </div>
+
+        <!-- ACTIONS -->
+        <div style="background:#f0fdf4;border:1px solid #bbf7d0;border-radius:8px;padding:16px;text-align:center;">
+          <div style="font-weight:700;font-size:13px;color:#14532d;margin-bottom:8px;">⚡ Actions rapides</div>
+          ${candidatEmail ? `<a href="mailto:${candidatEmail}" style="display:inline-block;background:#0f172a;color:white;text-decoration:none;padding:10px 20px;border-radius:6px;font-size:13px;font-weight:600;margin:4px;">📧 Contacter le candidat</a>` : ''}
+          ${e.telephone ? `<a href="tel:${e.telephone}" style="display:inline-block;background:#0f172a;color:white;text-decoration:none;padding:10px 20px;border-radius:6px;font-size:13px;font-weight:600;margin:4px;">📱 Appeler</a>` : ''}
+        </div>
+
+        <!-- FOOTER -->
+        <div style="margin-top:24px;text-align:center;font-size:11px;color:#94a3b8;border-top:1px solid #f1f5f9;padding-top:16px;">
+          Suisse Carrière Intelligence v2 — Email réservé admin
         </div>
       </div>
     </div>
