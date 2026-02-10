@@ -17,7 +17,7 @@ const app = express();
 const upload = multer({ storage: multer.memoryStorage() });
 
 app.use(cors());
-app.use(express.json()); // 👈 AJOUTÉ pour parser le JSON (nécessaire pour /generate-letter)
+app.use(express.json());
 
 // --- FONCTION D'EXTRACTION PDF ---
 async function extractTextFromPDF(buffer) {
@@ -34,47 +34,113 @@ async function extractTextFromPDF(buffer) {
   return fullText;
 }
 
-// --- PROMPT IA SCANNER CV ---
+// ═══════════════════════════════════════════════════════════════
+// PROMPT IA — SCANNER CV (v2 : Audit + Extraction structurée)
+// ═══════════════════════════════════════════════════════════════
 const SYSTEM_PROMPT = `
-Tu es un expert en recrutement suisse (Canton de Genève/Vaud). Analyse le CV fourni.
+Tu es un expert en recrutement suisse (Canton de Genève/Vaud/Valais). Analyse le CV fourni.
 
-ÉTAPE 1 : DÉTECTION DU PROFIL
-Détermine si le candidat est un profil MÉDICAL (Infirmier, Aide-Soignant, IADE, Tech) ou EXECUTIVE (Finance, Manager, IT, Admin, Ingénieur).
+═══════════════════════════════════════
+ÉTAPE 1 : EXTRACTION STRUCTURÉE
+═══════════════════════════════════════
+Extrais les données factuelles du CV. Si une info n'est pas trouvée, mets null.
+Sois PRÉCIS : ne déduis pas ce qui n'est pas écrit.
 
-ÉTAPE 2 : ANALYSE SELON LE PROFIL
+Règles d'extraction :
+- "metier" : classe le profil dans UNE des catégories suivantes UNIQUEMENT :
+  "AS" (Aide-Soignant/ASSC), "IDE" (Infirmier Diplômé d'État), "IADE" (Infirmier Anesthésiste),
+  "IBODE" (Infirmier de Bloc Opératoire), "SF" (Sage-Femme), "TECH" (Technicien médical/labo/radio),
+  "CADRE_SANTE" (Cadre de santé/ICUS), "EXECUTIVE" (profil non-médical), "AUTRE".
+- "experience_annees" : calcule à partir des dates des postes (pas de la date du diplôme).
+- "mention_crs" : true UNIQUEMENT si le CV mentionne explicitement "Croix-Rouge", "CRS",
+  "reconnaissance suisse", "PreCheck" ou "NAREG". Un simple séjour en Suisse ne compte pas.
+- "statut_crs" : "obtenue" si une date de validation est mentionnée, "en_cours" si le mot
+  "en cours" ou "déposé" apparaît, "non_mentionné" sinon.
+- "employeurs" : liste TOUS les postes dans l'ordre chronologique inverse (le plus récent d'abord).
+  Pour chaque poste, extrais le nom de l'établissement, le poste, le service, et les dates.
+- "ville_actuelle" : déduis de l'adresse postale sur le CV. Si seulement un département, mets le département.
+
+═══════════════════════════════════════
+ÉTAPE 2 : DÉTECTION DU PROFIL
+═══════════════════════════════════════
+Détermine si le candidat est un profil MÉDICAL (Infirmier, Aide-Soignant, IADE, Sage-Femme, Tech)
+ou EXECUTIVE (Finance, Manager, IT, Admin, Ingénieur).
+
+═══════════════════════════════════════
+ÉTAPE 3 : AUDIT QUALITÉ
+═══════════════════════════════════════
 
 >> SI MÉDICAL (Santé) :
-- Critique la reconnaissance diplôme : Vérifie s'il mentionne la Croix-Rouge ou PreCheck. Sinon, c'est une ALERTE ROUGE.
-- Critique les compétences techniques : Cherche des détails précis (Soins, Services, Machines). Le CV ne doit pas être vague.
+- Critique la reconnaissance diplôme : Vérifie s'il mentionne la Croix-Rouge ou PreCheck.
+  Sinon, c'est une ALERTE ROUGE.
+- Critique les compétences techniques : Cherche des détails précis (Soins, Services, Machines).
+  Le CV ne doit pas être vague.
+- Vérifie le format : Photo ? 2 pages max ? Références mentionnées ?
 - Ton : Empathique mais strict sur les certifications.
 
 >> SI EXECUTIVE (Cadre/Banque) :
-- Critique les chiffres : Cherche des résultats chiffrés (KPIs, Budgets gérés). S'il n'y en a pas, c'est une ALERTE ROUGE.
-- Critique le style : Vérifie si le ton est trop "littéraire/français". Exige un style factuel "Bullet points".
+- Critique les chiffres : Cherche des résultats chiffrés (KPIs, Budgets gérés).
+  S'il n'y en a pas, c'est une ALERTE ROUGE.
+- Critique le style : Vérifie si le ton est trop "littéraire/français".
+  Exige un style factuel "Bullet points".
 - Ton : Professionnel, direct, orienté ROI.
 
-ÉTAPE 3 : GÉNÉRATION DU JSON
+═══════════════════════════════════════
+ÉTAPE 4 : GÉNÉRATION DU JSON
+═══════════════════════════════════════
 Donne une note sur 100.
 
-FORMAT JSON ATTENDU :
+FORMAT JSON STRICT (pas de texte autour, juste le JSON) :
 {
-  "score": 65, 
+  "extracted_data": {
+    "nom": "Prénom NOM tel qu'écrit sur le CV ou null",
+    "email": "email trouvé dans le CV ou null",
+    "telephone": "numéro trouvé ou null (format original)",
+    "metier": "AS | IDE | IADE | IBODE | SF | TECH | CADRE_SANTE | EXECUTIVE | AUTRE",
+    "diplome_principal": "Intitulé exact du diplôme principal ou null",
+    "annee_diplome": 2019,
+    "specialites": ["Bloc opératoire", "Réanimation"],
+    "services": ["Cardiologie", "Urgences", "Chirurgie"],
+    "experience_annees": 5,
+    "employeurs": [
+      {
+        "nom": "CHU Lyon",
+        "poste": "Infirmière DE",
+        "service": "Cardiologie",
+        "debut": "2021-09",
+        "fin": "présent"
+      }
+    ],
+    "langues": ["Français (natif)", "Anglais (B2)"],
+    "formations_complementaires": ["AFGSU 2", "DU Plaies et Cicatrisation"],
+    "mention_crs": false,
+    "statut_crs": "obtenue | en_cours | non_mentionné",
+    "ville_actuelle": "Annemasse ou null",
+    "departement": "74 ou null",
+    "disponibilite": "immédiate | 2025-03 | non_mentionnée",
+    "a_photo": true,
+    "nombre_pages_estime": 2,
+    "references_mentionnees": false
+  },
+  "score": 65,
   "detected_profile": "MÉDICAL ou EXECUTIVE",
-  "summary": "Commence par : 'J'ai analysé votre profil [TYPE]...' puis donne ton verdict exécutif.",
+  "summary": "Commence par : 'J'ai analysé votre profil [TYPE]...' puis donne ton verdict exécutif en 3-4 phrases max.",
   "missing_keywords": [
-      "Point Bloquant 1 (Red Flag)", 
-      "Point Bloquant 2 (Red Flag)",
-      "Point Bloquant 3 (Red Flag)"
+    "Point Bloquant 1 (Red Flag)",
+    "Point Bloquant 2 (Red Flag)",
+    "Point Bloquant 3 (Red Flag)"
   ],
   "recommendations": [
-      "Point Fort 1 (Validé)", 
-      "Point Fort 2 (Validé)",
-      "Conseil rapide pour passer la barre"
+    "Point Fort 1 (Validé)",
+    "Point Fort 2 (Validé)",
+    "Conseil rapide pour passer la barre"
   ]
 }
 `;
 
-// --- PROMPT IA LETTRE DE MOTIVATION ---
+// ═══════════════════════════════════════════════════════════════
+// PROMPT IA — LETTRE DE MOTIVATION
+// ═══════════════════════════════════════════════════════════════
 const LETTER_PROMPT = `Tu es un expert en recrutement médical suisse, spécialisé dans l'accompagnement des soignants français vers la Suisse romande (Genève, Vaud, Valais).
 
 Ta mission : Rédiger une lettre de motivation PARFAITE, prête à envoyer, pour un poste dans le secteur médical suisse.
@@ -161,17 +227,22 @@ app.get('/', (req, res) => {
             resultDiv.innerHTML = "";
             loader.style.display = "block";
             btn.style.display = "none";
-            const steps = ["📂 Lecture du fichier...", "🧠 Détection du profil (Médical vs Executive)...", "🇨🇭 Comparaison avec les standards suisses...", "📊 Calcul du score de conformité..."];
+            const steps = ["📂 Lecture du fichier...", "🧠 Détection du profil (Médical vs Executive)...", "🔍 Extraction des données structurées...", "🇨🇭 Comparaison avec les standards suisses...", "📊 Calcul du score de conformité..."];
             let stepIndex = 0;
             const interval = setInterval(() => { stepIndex = (stepIndex + 1) % steps.length; loaderText.textContent = steps[stepIndex]; }, 1500);
             const formData = new FormData(e.target);
             try {
               const res = await fetch('/scan', { method: 'POST', body: formData });
-              const htmlContent = await res.text();
+              const data = await res.json();
               clearInterval(interval);
               loader.style.display = "none";
               btn.style.display = "inline-block";
-              resultDiv.innerHTML = htmlContent;
+              // Afficher le rapport HTML
+              resultDiv.innerHTML = (data.email_status || '') + data.report;
+              // Afficher les données extraites en dessous (mode debug)
+              if (data.extracted_data) {
+                resultDiv.innerHTML += '<details style="margin-top:30px;background:#f8fafc;padding:20px;border-radius:8px;border:1px solid #e2e8f0;"><summary style="cursor:pointer;font-weight:700;color:#0f172a;">📋 Données extraites (debug)</summary><pre style="margin-top:12px;font-size:12px;overflow-x:auto;color:#334155;">' + JSON.stringify(data.extracted_data, null, 2) + '</pre></details>';
+              }
               resultDiv.scrollIntoView({ behavior: 'smooth', block: 'start' });
             } catch (err) {
               clearInterval(interval);
@@ -187,11 +258,23 @@ app.get('/', (req, res) => {
 });
 
 // ═══════════════════════════════════════════════════════════════
-// ROUTE 2 : SCAN CV (existante)
+// ROUTE 2 : SCAN CV (v2 — Audit + Extraction structurée)
+// ═══════════════════════════════════════════════════════════════
+// Retourne maintenant du JSON (plus du HTML brut) pour permettre
+// au dashboard de récupérer les données extraites.
+//
+// Format de réponse :
+// {
+//   "report": "<html>...</html>",        ← Rapport visuel (comme avant)
+//   "extracted_data": { ... },           ← Données structurées du CV
+//   "score": 65,                         ← Score brut
+//   "detected_profile": "MÉDICAL",       ← Type de profil
+//   "email_status": "<html>..."          ← Message d'envoi email (optionnel)
+// }
 // ═══════════════════════════════════════════════════════════════
 app.post('/scan', upload.single('cv_file'), async (req, res) => {
   try {
-    if (!req.file) return res.status(400).send('Fichier manquant');
+    if (!req.file) return res.status(400).json({ error: 'Fichier manquant' });
 
     let text = '';
     console.log('📂 Fichier reçu :', req.file.mimetype);
@@ -207,11 +290,16 @@ app.post('/scan', upload.single('cv_file'), async (req, res) => {
       const result = await mammoth.extractRawText({ buffer: req.file.buffer });
       text = result.value;
     } else {
-      return res.status(400).send('Format non supporté (PDF ou DOCX uniquement)');
+      return res.status(400).json({ error: 'Format non supporté (PDF ou DOCX uniquement)' });
     }
 
-    if (!text || text.length < 20) return res.status(400).send('Fichier illisible.');
+    if (!text || text.length < 20) {
+      return res.status(400).json({ error: 'Fichier illisible ou trop court.' });
+    }
 
+    console.log(`📝 Texte extrait : ${text.length} caractères`);
+
+    // --- Appel IA (audit + extraction) ---
     const response = await fetch('https://openrouter.ai/api/v1/chat/completions', {
       method: 'POST',
       headers: {
@@ -232,49 +320,106 @@ app.post('/scan', upload.single('cv_file'), async (req, res) => {
     const aiJson = await response.json();
     if (aiJson.error) throw new Error('Erreur IA: ' + (aiJson.error.message || 'Erreur inconnue'));
 
-    const content = JSON.parse(aiJson.choices[0].message.content);
-    if (content.score < 1) content.score = Math.round(content.score * 100);
-
-    const htmlReport = generateReportHtml(content);
-
-    let emailMessage = '';
+    // --- Parse la réponse IA ---
+    let content;
     try {
-      const emailRes = await fetch('https://api.resend.com/emails', {
-        method: 'POST',
-        headers: {
-          Authorization: `Bearer ${process.env.RESEND_API_KEY}`,
-          'Content-Type': 'application/json',
-        },
-        body: JSON.stringify({
-          from: 'Audit Suisse Carrière <bonjour@suisse-carriere.com>',
-          to: req.body.user_email,
-          bcc: 'chaborel@gmail.com',
-          subject: `Résultat de votre Audit (${content.score}/100)`,
-          html: htmlReport,
-        }),
-      });
-      if (!emailRes.ok) throw new Error('Erreur API Resend');
-      emailMessage = `<div style="background:#dcfce7; color:#14532d; padding:12px; border-radius:6px; text-align:center; margin-bottom:30px; border:1px solid #bbf7d0; font-weight:600;">✅ Rapport envoyé à ${req.body.user_email}</div>`;
-    } catch (e) {
-      emailMessage = `<div style="background:#fff7ed; color:#9a3412; padding:12px; border-radius:6px; text-align:center; margin-bottom:30px; border:1px solid #ffedd5; font-size:13px;">⚠️ Note : Email non envoyé (vérification domaine requise), mais voici le résultat :</div>`;
+      const raw = aiJson.choices[0].message.content;
+      // Nettoyer d'éventuels ```json ... ``` autour
+      const cleaned = raw.replace(/^```json\s*/i, '').replace(/\s*```$/i, '').trim();
+      content = JSON.parse(cleaned);
+    } catch (parseErr) {
+      console.error('❌ Erreur parsing JSON IA:', parseErr);
+      console.error('Contenu brut:', aiJson.choices[0].message.content);
+      throw new Error('L\'IA a retourné un format invalide. Réessayez.');
     }
 
-    res.send(emailMessage + htmlReport);
+    // Normaliser le score
+    if (content.score < 1) content.score = Math.round(content.score * 100);
+
+    // Valider/nettoyer extracted_data
+    const extracted = content.extracted_data || {};
+    
+    // S'assurer que les champs critiques ont un format cohérent
+    if (extracted.metier && !['AS', 'IDE', 'IADE', 'IBODE', 'SF', 'TECH', 'CADRE_SANTE', 'EXECUTIVE', 'AUTRE'].includes(extracted.metier)) {
+      // Tenter de mapper des variantes courantes
+      const metierMap = {
+        'INFIRMIER': 'IDE', 'INFIRMIERE': 'IDE', 'INFIRMIÈRE': 'IDE',
+        'AIDE-SOIGNANT': 'AS', 'AIDE-SOIGNANTE': 'AS', 'AIDE SOIGNANT': 'AS',
+        'SAGE-FEMME': 'SF', 'SAGE FEMME': 'SF',
+        'ANESTHESISTE': 'IADE', 'ANESTHÉSISTE': 'IADE',
+        'BLOC': 'IBODE', 'BLOC OPÉRATOIRE': 'IBODE',
+        'CADRE': 'CADRE_SANTE',
+      };
+      const upper = extracted.metier.toUpperCase();
+      extracted.metier = metierMap[upper] || extracted.metier;
+    }
+
+    // S'assurer que les arrays sont bien des arrays
+    ['specialites', 'services', 'langues', 'formations_complementaires', 'employeurs'].forEach(field => {
+      if (extracted[field] && !Array.isArray(extracted[field])) {
+        extracted[field] = [extracted[field]];
+      }
+    });
+
+    console.log('✅ Extraction réussie :', extracted.nom, '|', extracted.metier, '|', extracted.experience_annees, 'ans');
+
+    // --- Générer le rapport HTML ---
+    const htmlReport = generateReportHtml(content);
+
+    // --- Envoi email (optionnel, comme avant) ---
+    let emailStatus = '';
+    if (req.body.user_email) {
+      try {
+        const emailRes = await fetch('https://api.resend.com/emails', {
+          method: 'POST',
+          headers: {
+            Authorization: `Bearer ${process.env.RESEND_API_KEY}`,
+            'Content-Type': 'application/json',
+          },
+          body: JSON.stringify({
+            from: 'Audit Suisse Carrière <bonjour@suisse-carriere.com>',
+            to: req.body.user_email,
+            bcc: 'chaborel@gmail.com',
+            subject: `Résultat de votre Audit (${content.score}/100)`,
+            html: htmlReport,
+          }),
+        });
+        if (!emailRes.ok) throw new Error('Erreur API Resend');
+        emailStatus = `<div style="background:#dcfce7; color:#14532d; padding:12px; border-radius:6px; text-align:center; margin-bottom:30px; border:1px solid #bbf7d0; font-weight:600;">✅ Rapport envoyé à ${req.body.user_email}</div>`;
+      } catch (e) {
+        emailStatus = `<div style="background:#fff7ed; color:#9a3412; padding:12px; border-radius:6px; text-align:center; margin-bottom:30px; border:1px solid #ffedd5; font-size:13px;">⚠️ Note : Email non envoyé (vérification domaine requise), mais voici le résultat :</div>`;
+      }
+    }
+
+    // --- Réponse JSON structurée ---
+    res.json({
+      report: htmlReport,
+      extracted_data: extracted,
+      score: content.score,
+      detected_profile: content.detected_profile || null,
+      summary: content.summary || null,
+      missing_keywords: content.missing_keywords || [],
+      recommendations: content.recommendations || [],
+      email_status: emailStatus,
+    });
+
   } catch (error) {
-    console.error('Erreur Backend:', error);
-    res.status(500).send(`<div style="color:red; text-align:center; padding:20px;">Erreur technique : ${error.message}</div>`);
+    console.error('❌ Erreur Backend:', error);
+    res.status(500).json({
+      error: error.message,
+      report: `<div style="color:red; text-align:center; padding:20px;">Erreur technique : ${error.message}</div>`,
+    });
   }
 });
 
 // ═══════════════════════════════════════════════════════════════
-// ROUTE 3 : GÉNÉRATION LETTRE DE MOTIVATION (NOUVELLE)
+// ROUTE 3 : GÉNÉRATION LETTRE DE MOTIVATION
 // ═══════════════════════════════════════════════════════════════
 app.post('/generate-letter', async (req, res) => {
   try {
     const data = req.body;
     console.log('✉️ Génération lettre pour:', data.nom);
 
-    // Construction du prompt utilisateur avec les données du formulaire
     const userPrompt = `Génère une lettre de motivation pour ce candidat (RÉPONDRE EN FRANÇAIS) :
 
 INFORMATIONS DU CANDIDAT :
@@ -299,7 +444,6 @@ INFORMATIONS DU CANDIDAT :
 
 Génère la lettre complète, prête à être copiée et envoyée.`;
 
-    // Appel à l'IA via OpenRouter (même config que le scanner)
     const response = await fetch('https://openrouter.ai/api/v1/chat/completions', {
       method: 'POST',
       headers: {
@@ -308,7 +452,7 @@ Génère la lettre complète, prête à être copiée et envoyée.`;
       },
       body: JSON.stringify({
         model: 'google/gemini-3-flash-preview',
-        temperature: 0.7, // Un peu plus créatif pour la rédaction
+        temperature: 0.7,
         messages: [
           { role: 'system', content: LETTER_PROMPT },
           { role: 'user', content: userPrompt },
@@ -317,7 +461,7 @@ Génère la lettre complète, prête à être copiée et envoyée.`;
     });
 
     const aiJson = await response.json();
-    
+
     if (aiJson.error) {
       console.error('Erreur OpenRouter:', aiJson.error);
       throw new Error('Erreur IA: ' + (aiJson.error.message || 'Erreur inconnue'));
@@ -325,34 +469,163 @@ Génère la lettre complète, prête à être copiée et envoyée.`;
 
     const letter = aiJson.choices[0].message.content;
 
-    // Retourne la lettre en JSON
-    res.json({ 
+    res.json({
       success: true,
-      letter: letter 
+      letter: letter,
     });
-
   } catch (error) {
     console.error('❌ Erreur génération lettre:', error);
-    res.status(500).json({ 
+    res.status(500).json({
       success: false,
-      error: error.message 
+      error: error.message,
     });
+  }
+});
+
+// ═══════════════════════════════════════════════════════════════
+// ROUTE 4 : PROFIL CANDIDAT COMPLET (NOUVEAU)
+// ═══════════════════════════════════════════════════════════════
+// Endpoint appelé par le dashboard pour fusionner :
+//   - scannerData (du dashboard Mission 2)
+//   - extracted_data (du scan CV Mission 3)
+// et générer une fiche profil propre pour l'agence.
+//
+// POST /profile/merge
+// Body : { scannerData: {...}, extractedData: {...}, cvScore: 65 }
+// Response : { profile: {...}, ficheAgence: "texte résumé" }
+// ═══════════════════════════════════════════════════════════════
+app.post('/profile/merge', (req, res) => {
+  try {
+    const { scannerData = {}, extractedData = {}, cvScore = null } = req.body;
+
+    // Fusion intelligente : extracted_data (CV) prime pour les faits,
+    // scannerData (dashboard) prime pour les intentions/projets
+    const profile = {
+      // --- Identité (CV uniquement) ---
+      nom: extractedData.nom || null,
+      email: extractedData.email || scannerData.email || null,
+      telephone: extractedData.telephone || null,
+
+      // --- Métier : CV confirme, dashboard en fallback ---
+      metier: extractedData.metier || scannerData.metier || null,
+      diplome_principal: extractedData.diplome_principal || null,
+      annee_diplome: extractedData.annee_diplome || null,
+
+      // --- Expérience : CV est plus précis ---
+      experience_annees: extractedData.experience_annees || scannerData.experience_tranche || null,
+      specialites: extractedData.specialites || [],
+      services: extractedData.services || [],
+      employeurs: extractedData.employeurs || [],
+      langues: extractedData.langues || [],
+      formations_complementaires: extractedData.formations_complementaires || [],
+
+      // --- CRS : CV vérifie, dashboard complète ---
+      mention_crs: extractedData.mention_crs || false,
+      statut_crs: extractedData.statut_crs !== 'non_mentionné'
+        ? extractedData.statut_crs
+        : (scannerData.statut_crs || 'non_mentionné'),
+
+      // --- Projet Suisse (dashboard UNIQUEMENT, jamais dans un CV) ---
+      statut: scannerData.statut || 'frontalier',
+      zone_cible: scannerData.zone || scannerData.canton || 'indecis',
+      situation_familiale: scannerData.situation || null,
+      disponibilite: extractedData.disponibilite !== 'non_mentionnée'
+        ? extractedData.disponibilite
+        : (scannerData.disponibilite || null),
+
+      // --- Qualité CV ---
+      cv_score: cvScore,
+      a_photo: extractedData.a_photo || false,
+      references_mentionnees: extractedData.references_mentionnees || false,
+      ville_actuelle: extractedData.ville_actuelle || null,
+
+      // --- Métadonnées ---
+      date_creation: new Date().toISOString(),
+      source: 'suisse-carriere.com',
+    };
+
+    // --- Générer un résumé texte pour l'agence ---
+    const metierLabels = {
+      AS: 'Aide-Soignant(e)', IDE: 'Infirmier(e) DE', IADE: 'IADE',
+      IBODE: 'IBODE', SF: 'Sage-Femme', TECH: 'Technicien(ne)',
+      CADRE_SANTE: 'Cadre de Santé', EXECUTIVE: 'Profil Executive',
+    };
+
+    const statutLabels = { frontalier: 'Frontalier (Permis G)', resident: 'Résident (Permis B)' };
+    const crsLabels = { obtenue: '✅ CRS obtenue', en_cours: '⏳ CRS en cours', 'non_mentionné': '❌ CRS non mentionnée' };
+    const zoneLabels = { geneve: 'Genève', vaud: 'Vaud', valais: 'Valais', indecis: 'À définir' };
+
+    const ficheAgence = [
+      `═══ FICHE PROFIL CANDIDAT ═══`,
+      ``,
+      `Nom : ${profile.nom || '—'}`,
+      `Métier : ${metierLabels[profile.metier] || profile.metier || '—'}`,
+      `Diplôme : ${profile.diplome_principal || '—'}${profile.annee_diplome ? ' (' + profile.annee_diplome + ')' : ''}`,
+      `Expérience : ${profile.experience_annees ? profile.experience_annees + ' ans' : '—'}`,
+      `Spécialités : ${profile.specialites.length ? profile.specialites.join(', ') : '—'}`,
+      `Services maîtrisés : ${profile.services.length ? profile.services.join(', ') : '—'}`,
+      `Langues : ${profile.langues.length ? profile.langues.join(', ') : '—'}`,
+      ``,
+      `Statut CRS : ${crsLabels[profile.statut_crs] || '—'}`,
+      `Projet : ${statutLabels[profile.statut] || '—'}`,
+      `Zone cible : ${zoneLabels[profile.zone_cible] || profile.zone_cible || '—'}`,
+      `Disponibilité : ${profile.disponibilite || '—'}`,
+      `Situation : ${profile.situation_familiale || '—'}`,
+      ``,
+      `Contact : ${profile.email || '—'} | ${profile.telephone || '—'}`,
+      `Localisation actuelle : ${profile.ville_actuelle || '—'}`,
+      `Score CV : ${profile.cv_score ? profile.cv_score + '/100' : '—'}`,
+      ``,
+      `Derniers postes :`,
+      ...(profile.employeurs.length
+        ? profile.employeurs.slice(0, 3).map(e =>
+            `  • ${e.poste || '—'} — ${e.nom || '—'}${e.service ? ' (' + e.service + ')' : ''} — ${e.debut || '?'} → ${e.fin || '?'}`)
+        : ['  Aucun poste extrait']),
+      ``,
+      `Généré le ${new Date().toLocaleDateString('fr-FR')} — suisse-carriere.com`,
+    ].join('\n');
+
+    console.log('✅ Profil fusionné :', profile.nom, '|', profile.metier, '|', profile.zone_cible);
+
+    res.json({
+      success: true,
+      profile: profile,
+      ficheAgence: ficheAgence,
+    });
+  } catch (error) {
+    console.error('❌ Erreur merge profil:', error);
+    res.status(500).json({ success: false, error: error.message });
   }
 });
 
 // ═══════════════════════════════════════════════════════════════
 // SERVEUR
 // ═══════════════════════════════════════════════════════════════
-const PORT = 3000;
-app.listen(PORT, () => console.log(`🚀 Backend Suisse Carrière prêt sur port ${PORT}`));
+const PORT = process.env.PORT || 3000;
+app.listen(PORT, () => console.log(`🚀 Backend Suisse Carrière v2 prêt sur port ${PORT}`));
 
 // ═══════════════════════════════════════════════════════════════
 // FONCTION DESIGN RAPPORT HTML
 // ═══════════════════════════════════════════════════════════════
 function generateReportHtml(data) {
   const color = data.score >= 70 ? '#10b981' : data.score >= 40 ? '#f59e0b' : '#ef4444';
-  const redFlags = data.missing_keywords || ["Aucun point bloquant majeur détecté."];
-  const greenPoints = data.recommendations || ["Profil globalement intéressant."];
+  const redFlags = data.missing_keywords || ['Aucun point bloquant majeur détecté.'];
+  const greenPoints = data.recommendations || ['Profil globalement intéressant.'];
+  const extracted = data.extracted_data || {};
+
+  // Bandeau résumé des données extraites (nouveau)
+  const extractedBanner = extracted.nom ? `
+    <div style="background: #f0f9ff; border: 1px solid #bae6fd; border-radius: 8px; padding: 20px; margin-bottom: 30px;">
+      <div style="font-weight: 700; color: #0c4a6e; margin-bottom: 10px; font-size: 14px;">📋 Données extraites de votre CV</div>
+      <div style="display: grid; grid-template-columns: 1fr 1fr; gap: 8px; font-size: 13px; color: #334155;">
+        <div><strong>Nom :</strong> ${extracted.nom || '—'}</div>
+        <div><strong>Métier :</strong> ${extracted.metier || '—'}</div>
+        <div><strong>Expérience :</strong> ${extracted.experience_annees ? extracted.experience_annees + ' ans' : '—'}</div>
+        <div><strong>CRS :</strong> ${extracted.statut_crs === 'obtenue' ? '✅ Obtenue' : extracted.statut_crs === 'en_cours' ? '⏳ En cours' : '❌ Non mentionnée'}</div>
+        ${extracted.specialites && extracted.specialites.length ? `<div style="grid-column: span 2;"><strong>Spécialités :</strong> ${extracted.specialites.join(', ')}</div>` : ''}
+      </div>
+    </div>
+  ` : '';
 
   return `
     <div style="font-family: 'Inter', Helvetica, sans-serif; max-width: 700px; margin: 0 auto; background: white; border: 1px solid #e2e8f0; border-radius: 12px; overflow: hidden; box-shadow: 0 10px 15px -3px rgba(0, 0, 0, 0.05);">
@@ -367,6 +640,7 @@ function generateReportHtml(data) {
           </div>
           <div style="text-transform: uppercase; font-size: 12px; color: #64748b; margin-top: 15px; font-weight: 700; letter-spacing: 1px;">Score de Compatibilité</div>
         </div>
+        ${extractedBanner}
         <div style="background: #f8fafc; padding: 25px; border-left: 4px solid #0f172a; margin-bottom: 40px; border-radius: 0 8px 8px 0;">
           <strong style="color:#0f172a; display:block; margin-bottom:8px; font-size:14px; text-transform:uppercase;">Verdict de l'IA</strong>
           <span style="line-height: 1.6; color: #334155;">${data.summary}</span>
@@ -396,7 +670,7 @@ function generateReportHtml(data) {
           </a>
         </div>
         <div style="margin-top: 40px; text-align: center; font-size: 12px; color: #94a3b8; border-top: 1px solid #f1f5f9; padding-top: 20px;">
-          Généré par Suisse Carrière Intelligence
+          Généré par Suisse Carrière Intelligence v2
         </div>
       </div>
     </div>
