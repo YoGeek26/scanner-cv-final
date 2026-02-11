@@ -13,7 +13,8 @@ const cors = require('cors');
 // MOTEUR PDF MOZILLA (Version 2.16 Legacy)
 const pdfjsLib = require('pdfjs-dist/legacy/build/pdf.js');
 
-// ═══ MAKE WEBHOOK (même URL que le simulateur salaire) ═══
+// ═══ MAKE WEBHOOK — même URL que le simulateur salaire ═══
+// Dans .env sur Render : MAKE_WEBHOOK_URL=https://hook.eu2.make.com/ton-id
 const MAKE_WEBHOOK_URL = process.env.MAKE_WEBHOOK_URL || '';
 
 const app = express();
@@ -38,100 +39,73 @@ async function extractTextFromPDF(buffer) {
 }
 
 // ═══════════════════════════════════════════════════════════════
-// QUALIFICATION CV → Même système de tiers que le simulateur
+// QUALIFICATION CV → Même tiers que le simulateur salaire
 // ═══════════════════════════════════════════════════════════════
 function qualifyFromCV(extracted, cvScore) {
-  let score = 0;
-  let maxScore = 0;
+  let score = 0, maxScore = 0;
 
-  // Métier
   const metierScores = { IDE: 10, IADE: 14, IBODE: 13, AS: 7, SF: 10, TECH: 8, CADRE_SANTE: 11, EXECUTIVE: 6, AUTRE: 4 };
   maxScore += 14;
   score += metierScores[extracted.metier] || 4;
 
-  // Expérience
   const exp = extracted.experience_annees || 0;
   maxScore += 12;
-  if (exp >= 6) score += 12;
-  else if (exp >= 3) score += 10;
-  else if (exp >= 1) score += 5;
-  else score += 2;
+  if (exp >= 6) score += 12; else if (exp >= 3) score += 10; else if (exp >= 1) score += 5; else score += 2;
 
-  // Spécialité (tension = plus de points)
   const tensionSpecs = ['réanimation', 'réa', 'soins intensifs', 'urgences', 'bloc', 'bloc opératoire', 'anesthésie'];
   const specs = (extracted.specialites || []).concat(extracted.services || []).map(s => s.toLowerCase());
   maxScore += 14;
   if (specs.some(s => tensionSpecs.some(t => s.includes(t)))) score += 14;
   else if (specs.some(s => ['chirurgie', 'pédiatrie', 'néonat'].some(t => s.includes(t)))) score += 10;
-  else if (specs.length > 0) score += 6;
-  else score += 3;
+  else if (specs.length > 0) score += 6; else score += 3;
 
-  // CRS
   maxScore += 15;
   if (extracted.statut_crs === 'obtenue') score += 15;
   else if (extracted.statut_crs === 'en_cours') score += 10;
-  else if (extracted.mention_crs) score += 6;
-  else score += 1;
+  else if (extracted.mention_crs) score += 6; else score += 1;
 
-  // Localisation frontalière
-  const frontDepts = ['74', '01', '25', '39', '68', '90'];
+  const FRONT_DEPTS = ['74', '01', '25', '39', '68', '90'];
+  const PROCHE_DEPTS = ['69', '73', '38', '42', '71', '21', '70', '88', '67', '57', '54'];
   maxScore += 14;
-  if (frontDepts.includes(extracted.departement)) score += 14;
-  else if (['69', '73', '38', '42', '71', '21', '70', '88', '67', '57', '54'].includes(extracted.departement)) score += 7;
+  if (FRONT_DEPTS.includes(extracted.departement)) score += 14;
+  else if (PROCHE_DEPTS.includes(extracted.departement)) score += 7;
   else if (extracted.ville_actuelle && extracted.ville_actuelle.toLowerCase().includes('suisse')) score += 14;
   else score += 4;
 
-  // Disponibilité
   maxScore += 14;
   const dispo = (extracted.disponibilite || '').toLowerCase();
   if (dispo.includes('immédiat') || dispo === 'immédiate') score += 14;
-  else if (dispo && dispo !== 'non_mentionnée') score += 8;
-  else score += 3;
+  else if (dispo && dispo !== 'non_mentionnée') score += 8; else score += 3;
 
-  // Qualité CV (bonus)
   maxScore += 12;
-  if (cvScore >= 70) score += 12;
-  else if (cvScore >= 50) score += 8;
-  else if (cvScore >= 30) score += 4;
-  else score += 1;
+  if (cvScore >= 70) score += 12; else if (cvScore >= 50) score += 8; else if (cvScore >= 30) score += 4; else score += 1;
 
   const pct = Math.round((score / maxScore) * 100);
-  let tier;
-  if (pct >= 75) tier = 'pepite';
-  else if (pct >= 55) tier = 'chaud';
-  else if (pct >= 35) tier = 'potentiel';
-  else tier = 'explorateur';
-
+  const tier = pct >= 75 ? 'pepite' : pct >= 55 ? 'chaud' : pct >= 35 ? 'potentiel' : 'explorateur';
   return { pct, tier };
 }
 
 // ═══════════════════════════════════════════════════════════════
-// ENVOI LEAD CV → Make (même format que le simulateur salaire)
+// ENVOI LEAD CV → Make → Google Sheet + Shopify + Brevo
 // ═══════════════════════════════════════════════════════════════
 async function sendCVLeadToMake(extracted, cvScore, candidatEmail) {
   if (!MAKE_WEBHOOK_URL) {
-    console.log('⚠️ MAKE_WEBHOOK_URL non configuré — lead CV non envoyé');
+    console.log('⚠️ MAKE_WEBHOOK_URL non configuré — lead non envoyé');
     return;
   }
 
   const qual = qualifyFromCV(extracted, cvScore);
 
-  // Mapper experience → tranche simulateur
   const exp = extracted.experience_annees || 0;
-  let experienceTranche;
+  let experienceTranche = '3-5';
   if (exp < 1) experienceTranche = '<1';
   else if (exp <= 2) experienceTranche = '1-2';
   else if (exp <= 5) experienceTranche = '3-5';
   else if (exp <= 10) experienceTranche = '6-10';
   else experienceTranche = '10+';
 
-  // Mapper metier → code simulateur
-  const metierMap = {
-    IDE: 'ide', IADE: 'iade', IBODE: 'ibode', AS: 'as', SF: 'sf',
-    TECH: 'autre', CADRE_SANTE: 'autre', EXECUTIVE: 'autre', AUTRE: 'autre'
-  };
+  const metierMap = { IDE: 'ide', IADE: 'iade', IBODE: 'ibode', AS: 'as', SF: 'sf', TECH: 'autre', CADRE_SANTE: 'autre', EXECUTIVE: 'autre', AUTRE: 'autre' };
 
-  // Mapper spécialité → code simulateur
   const specsJoined = (extracted.specialites || []).concat(extracted.services || []).join(' ').toLowerCase();
   let specialiteCode = 'autre';
   if (specsJoined.includes('réa') || specsJoined.includes('soins intensifs')) specialiteCode = 'rea';
@@ -143,29 +117,25 @@ async function sendCVLeadToMake(extracted, cvScore, candidatEmail) {
   else if (specsJoined.includes('gériat') || specsJoined.includes('ems')) specialiteCode = 'geriatrie';
   else if (specsJoined.includes('médecine')) specialiteCode = 'medecine';
 
-  // Mapper CRS
   const crsMap = { obtenue: 'obtenue', en_cours: 'en_cours', 'non_mentionné': 'recherche' };
 
-  // Mapper localisation depuis département
-  const frontDepts = ['74', '01', '25', '39', '68', '90'];
-  const procheDepts = ['69', '73', '38', '42', '71', '21', '70', '88', '67', '57', '54'];
+  const FRONT_DEPTS = ['74', '01', '25', '39', '68', '90'];
+  const PROCHE_DEPTS = ['69', '73', '38', '42', '71', '21', '70', '88', '67', '57', '54'];
   let locCode = 'france';
-  if (frontDepts.includes(extracted.departement)) locCode = 'frontalier';
-  else if (procheDepts.includes(extracted.departement)) locCode = 'proche';
+  if (FRONT_DEPTS.includes(extracted.departement)) locCode = 'frontalier';
+  else if (PROCHE_DEPTS.includes(extracted.departement)) locCode = 'proche';
 
-  // Mapper disponibilité
   const dispoRaw = (extracted.disponibilite || '').toLowerCase();
   let dispoCode = '3_6_mois';
   if (dispoRaw.includes('immédiat')) dispoCode = 'immediat';
   else if (dispoRaw.includes('1 mois') || dispoRaw.includes('sous 1')) dispoCode = '1_mois';
   else if (dispoRaw.includes('2') || dispoRaw.includes('3 mois')) dispoCode = '2_3_mois';
 
-  // Prénom
   const prenom = extracted.nom ? extracted.nom.split(' ')[0] : 'Inconnu';
 
-  // Payload — mêmes champs que le simulateur + bonus CV
+  // Même structure que le simulateur salaire + champs bonus CV
   const payload = {
-    prenom: prenom,
+    prenom,
     email: extracted.email || candidatEmail || '',
     metier: metierMap[extracted.metier] || 'autre',
     experience: experienceTranche,
@@ -180,7 +150,7 @@ async function sendCVLeadToMake(extracted, cvScore, candidatEmail) {
     tier: qual.tier,
     source: 'cv_scanner',
     timestamp: new Date().toISOString(),
-    // Bonus CV
+    // Bonus CV (colonnes supplémentaires dans le Sheet)
     nom_complet: extracted.nom || '',
     telephone: extracted.telephone || '',
     cv_score: cvScore,
@@ -197,7 +167,7 @@ async function sendCVLeadToMake(extracted, cvScore, candidatEmail) {
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify(payload),
     });
-    console.log(`✅ Lead CV envoyé à Make (${qual.tier} — ${qual.pct}%) :`, extracted.nom);
+    console.log(`✅ Lead CV → Make (${qual.tier} ${qual.pct}%) :`, extracted.nom);
   } catch (err) {
     console.error('❌ Erreur envoi Make:', err.message);
   }
@@ -216,100 +186,59 @@ Extrais les données factuelles du CV. Si une info n'est pas trouvée, mets null
 Sois PRÉCIS : ne déduis pas ce qui n'est pas écrit.
 
 Règles d'extraction :
-- "metier" : classe le profil dans UNE des catégories suivantes UNIQUEMENT :
-  "AS" (Aide-Soignant/ASSC), "IDE" (Infirmier Diplômé d'État), "IADE" (Infirmier Anesthésiste),
-  "IBODE" (Infirmier de Bloc Opératoire), "SF" (Sage-Femme), "TECH" (Technicien médical/labo/radio),
-  "CADRE_SANTE" (Cadre de santé/ICUS), "EXECUTIVE" (profil non-médical), "AUTRE".
-- "experience_annees" : calcule à partir des dates des postes (pas de la date du diplôme).
-- "mention_crs" : true UNIQUEMENT si le CV mentionne explicitement "Croix-Rouge", "CRS",
-  "reconnaissance suisse", "PreCheck" ou "NAREG". Un simple séjour en Suisse ne compte pas.
-- "statut_crs" : "obtenue" si une date de validation est mentionnée, "en_cours" si le mot
-  "en cours" ou "déposé" apparaît, "non_mentionné" sinon.
-- "employeurs" : liste TOUS les postes dans l'ordre chronologique inverse (le plus récent d'abord).
-  Pour chaque poste, extrais le nom de l'établissement, le poste, le service, et les dates.
-- "ville_actuelle" : déduis de l'adresse postale sur le CV. Si seulement un département, mets le département.
+- "metier" : classe dans UNE catégorie : "AS", "IDE", "IADE", "IBODE", "SF", "TECH", "CADRE_SANTE", "EXECUTIVE", "AUTRE".
+- "experience_annees" : calcule à partir des dates des postes.
+- "mention_crs" : true UNIQUEMENT si le CV mentionne "Croix-Rouge", "CRS", "PreCheck" ou "NAREG".
+- "statut_crs" : "obtenue" / "en_cours" / "non_mentionné".
+- "employeurs" : liste les postes (ordre chronologique inverse).
+- "ville_actuelle" : déduis de l'adresse postale.
 
 ═══════════════════════════════════════
 ÉTAPE 2 : DÉTECTION DU PROFIL
 ═══════════════════════════════════════
-Détermine si le candidat est un profil MÉDICAL (Infirmier, Aide-Soignant, IADE, Sage-Femme, Tech)
-ou EXECUTIVE (Finance, Manager, IT, Admin, Ingénieur).
+MÉDICAL (Infirmier, AS, IADE, SF, Tech) ou EXECUTIVE (Finance, Manager, IT).
 
 ═══════════════════════════════════════
 ÉTAPE 3 : AUDIT QUALITÉ
 ═══════════════════════════════════════
-
->> SI MÉDICAL (Santé) :
-- Critique la reconnaissance diplôme : Vérifie s'il mentionne la Croix-Rouge ou PreCheck.
-  Sinon, c'est une ALERTE ROUGE.
-- Critique les compétences techniques : Cherche des détails précis (Soins, Services, Machines).
-  Le CV ne doit pas être vague.
-- Vérifie le format : Photo ? 2 pages max ? Références mentionnées ?
-- Ton : Empathique mais strict sur les certifications.
-
->> SI EXECUTIVE (Cadre/Banque) :
-- Critique les chiffres : Cherche des résultats chiffrés (KPIs, Budgets gérés).
-  S'il n'y en a pas, c'est une ALERTE ROUGE.
-- Critique le style : Vérifie si le ton est trop "littéraire/français".
-  Exige un style factuel "Bullet points".
-- Ton : Professionnel, direct, orienté ROI.
+>> SI MÉDICAL : Critique CRS (alerte rouge si absent), compétences techniques, format CV.
+>> SI EXECUTIVE : Critique chiffres/KPIs (alerte rouge si absents), style factuel.
 
 ═══════════════════════════════════════
-ÉTAPE 4 : GÉNÉRATION DU JSON
+ÉTAPE 4 : JSON STRICT
 ═══════════════════════════════════════
-Donne une note sur 100.
-
-FORMAT JSON STRICT (pas de texte autour, juste le JSON) :
 {
   "extracted_data": {
-    "nom": "Prénom NOM tel qu'écrit sur le CV ou null",
-    "email": "email trouvé dans le CV ou null",
-    "telephone": "numéro trouvé ou null (format original)",
-    "metier": "AS | IDE | IADE | IBODE | SF | TECH | CADRE_SANTE | EXECUTIVE | AUTRE",
-    "diplome_principal": "Intitulé exact du diplôme principal ou null",
+    "nom": "string ou null",
+    "email": "string ou null",
+    "telephone": "string ou null",
+    "metier": "AS|IDE|IADE|IBODE|SF|TECH|CADRE_SANTE|EXECUTIVE|AUTRE",
+    "diplome_principal": "string ou null",
     "annee_diplome": 2019,
-    "specialites": ["Bloc opératoire", "Réanimation"],
-    "services": ["Cardiologie", "Urgences", "Chirurgie"],
+    "specialites": ["Bloc opératoire"],
+    "services": ["Cardiologie", "Urgences"],
     "experience_annees": 5,
-    "employeurs": [
-      {
-        "nom": "CHU Lyon",
-        "poste": "Infirmière DE",
-        "service": "Cardiologie",
-        "debut": "2021-09",
-        "fin": "présent"
-      }
-    ],
-    "langues": ["Français (natif)", "Anglais (B2)"],
-    "formations_complementaires": ["AFGSU 2", "DU Plaies et Cicatrisation"],
+    "employeurs": [{"nom":"CHU Lyon","poste":"IDE","service":"Cardio","debut":"2021-09","fin":"présent"}],
+    "langues": ["Français (natif)"],
+    "formations_complementaires": ["AFGSU 2"],
     "mention_crs": false,
-    "statut_crs": "obtenue | en_cours | non_mentionné",
-    "ville_actuelle": "Annemasse ou null",
+    "statut_crs": "obtenue|en_cours|non_mentionné",
+    "ville_actuelle": "string ou null",
     "departement": "74 ou null",
-    "disponibilite": "immédiate | 2025-03 | non_mentionnée",
+    "disponibilite": "immédiate|2025-03|non_mentionnée",
     "a_photo": true,
     "nombre_pages_estime": 2,
     "references_mentionnees": false
   },
   "score": 65,
-  "detected_profile": "MÉDICAL ou EXECUTIVE",
-  "summary": "Commence par : 'J'ai analysé votre profil [TYPE]...' puis donne ton verdict exécutif en 3-4 phrases max.",
-  "missing_keywords": [
-    "Point Bloquant 1 (Red Flag)",
-    "Point Bloquant 2 (Red Flag)",
-    "Point Bloquant 3 (Red Flag)"
-  ],
-  "recommendations": [
-    "Point Fort 1 (Validé)",
-    "Point Fort 2 (Validé)",
-    "Conseil rapide pour passer la barre"
-  ]
+  "detected_profile": "MÉDICAL",
+  "summary": "J'ai analysé votre profil... (3-4 phrases max)",
+  "missing_keywords": ["Red Flag 1", "Red Flag 2", "Red Flag 3"],
+  "recommendations": ["Point Fort 1", "Point Fort 2", "Conseil"]
 }
 `;
 
-// ═══════════════════════════════════════════════════════════════
-// PROMPT IA — LETTRE DE MOTIVATION
-// ═══════════════════════════════════════════════════════════════
+// --- PROMPT IA LETTRE DE MOTIVATION (inchangé) ---
 const LETTER_PROMPT = `Tu es un expert en recrutement médical suisse, spécialisé dans l'accompagnement des soignants français vers la Suisse romande (Genève, Vaud, Valais).
 
 Ta mission : Rédiger une lettre de motivation PARFAITE, prête à envoyer, pour un poste dans le secteur médical suisse.
@@ -325,23 +254,19 @@ RÈGLES DE RÉDACTION :
    - Mention des pièces jointes
 
 2. STRUCTURE DU CORPS :
-   - Paragraphe 1 (VOUS) : Pourquoi cet établissement vous attire (montrer qu'on a fait ses recherches)
+   - Paragraphe 1 (VOUS) : Pourquoi cet établissement vous attire
    - Paragraphe 2 (MOI) : Parcours et compétences clés avec des faits concrets
    - Paragraphe 3 (NOUS) : Ce que vous apporterez + reconnaissance CRS + disponibilité
    - Conclusion : Demande d'entretien + formule de politesse
 
-3. TON :
-   - Professionnel mais pas froid
-   - Confiant sans être arrogant
-   - Factuel (éviter les superlatifs vagues)
-   - Adapté à la culture suisse (précision, modestie, fiabilité)
+3. TON : Professionnel, confiant, factuel, adapté à la culture suisse.
 
 4. IMPORTANT :
-   - Mentionne TOUJOURS le statut de reconnaissance Croix-Rouge
-   - Si le candidat est frontalier, mentionne sa mobilité
-   - Termine TOUJOURS par la liste des pièces jointes
+   - Mentionne TOUJOURS le statut Croix-Rouge
+   - Si frontalier, mentionne sa mobilité
+   - Termine par la liste des pièces jointes
 
-GÉNÈRE UNIQUEMENT LA LETTRE, sans aucun commentaire avant ou après. La lettre doit être prête à copier-coller.`;
+GÉNÈRE UNIQUEMENT LA LETTRE, sans commentaire.`;
 
 // ═══════════════════════════════════════════════════════════════
 // ROUTE 1 : PAGE D'ACCUEIL (Test interne)
@@ -422,7 +347,7 @@ app.get('/', (req, res) => {
 });
 
 // ═══════════════════════════════════════════════════════════════
-// ROUTE 2 : SCAN CV (v2 — Audit + Extraction + Make webhook)
+// ROUTE 2 : SCAN CV (v2 — extraction + Make + email fix + speed)
 // ═══════════════════════════════════════════════════════════════
 app.post('/scan', upload.single('cv_file'), async (req, res) => {
   const wantJson = req.query.format === 'json'
@@ -448,27 +373,26 @@ app.post('/scan', upload.single('cv_file'), async (req, res) => {
       const result = await mammoth.extractRawText({ buffer: req.file.buffer });
       text = result.value;
     } else {
-      if (wantJson) return res.status(400).json({ error: 'Format non supporté (PDF ou DOCX uniquement)' });
+      if (wantJson) return res.status(400).json({ error: 'Format non supporté' });
       return res.status(400).send('Format non supporté (PDF ou DOCX uniquement)');
     }
 
     if (!text || text.length < 20) {
-      if (wantJson) return res.status(400).json({ error: 'Fichier illisible ou trop court.' });
+      if (wantJson) return res.status(400).json({ error: 'Fichier illisible' });
       return res.status(400).send('Fichier illisible.');
     }
 
     console.log(`📝 Texte extrait : ${text.length} caractères`);
 
-    // --- Tronquer les CV trop longs (au-delà de 6000 chars, l'IA ralentit sans gain) ---
-    const maxChars = 6000;
-    if (text.length > maxChars) {
-      console.log(`✂️ Texte tronqué de ${text.length} à ${maxChars} caractères`);
-      text = text.substring(0, maxChars);
+    // ── FIX VITESSE : tronquer les CV trop longs ──
+    if (text.length > 6000) {
+      console.log(`✂️ Tronqué de ${text.length} → 6000 chars`);
+      text = text.substring(0, 6000);
     }
 
-    // --- Appel IA (audit + extraction) avec timeout ---
+    // ── FIX VITESSE : timeout 60s + modèle rapide ──
     const controller = new AbortController();
-    const timeout = setTimeout(() => controller.abort(), 60000); // 60 sec max
+    const timeout = setTimeout(() => controller.abort(), 60000);
 
     const response = await fetch('https://openrouter.ai/api/v1/chat/completions', {
       method: 'POST',
@@ -491,137 +415,79 @@ app.post('/scan', upload.single('cv_file'), async (req, res) => {
     const aiJson = await response.json();
     if (aiJson.error) throw new Error('Erreur IA: ' + (aiJson.error.message || 'Erreur inconnue'));
 
-    // --- Parse la réponse IA ---
+    // ── Parse la réponse IA ──
     let content;
     try {
       const raw = aiJson.choices[0].message.content;
       const cleaned = raw.replace(/^```json\s*/i, '').replace(/\s*```$/i, '').trim();
       content = JSON.parse(cleaned);
     } catch (parseErr) {
-      console.error('❌ Erreur parsing JSON IA:', parseErr);
-      console.error('Contenu brut:', aiJson.choices[0].message.content);
+      console.error('❌ Parse JSON IA:', parseErr);
+      console.error('Brut:', aiJson.choices[0].message.content);
       throw new Error('L\'IA a retourné un format invalide. Réessayez.');
     }
 
-    // Normaliser le score
     if (content.score < 1) content.score = Math.round(content.score * 100);
 
-    // Valider/nettoyer extracted_data
+    // ── Nettoyer extracted_data ──
     const extracted = content.extracted_data || {};
 
     if (extracted.metier && !['AS', 'IDE', 'IADE', 'IBODE', 'SF', 'TECH', 'CADRE_SANTE', 'EXECUTIVE', 'AUTRE'].includes(extracted.metier)) {
-      const metierMap = {
-        'INFIRMIER': 'IDE', 'INFIRMIERE': 'IDE', 'INFIRMIÈRE': 'IDE',
-        'AIDE-SOIGNANT': 'AS', 'AIDE-SOIGNANTE': 'AS', 'AIDE SOIGNANT': 'AS',
-        'SAGE-FEMME': 'SF', 'SAGE FEMME': 'SF',
-        'ANESTHESISTE': 'IADE', 'ANESTHÉSISTE': 'IADE',
-        'BLOC': 'IBODE', 'BLOC OPÉRATOIRE': 'IBODE',
-        'CADRE': 'CADRE_SANTE',
-      };
-      const upper = extracted.metier.toUpperCase();
-      extracted.metier = metierMap[upper] || extracted.metier;
+      const norm = { 'INFIRMIER': 'IDE', 'INFIRMIERE': 'IDE', 'INFIRMIÈRE': 'IDE', 'AIDE-SOIGNANT': 'AS', 'AIDE-SOIGNANTE': 'AS', 'SAGE-FEMME': 'SF', 'ANESTHESISTE': 'IADE', 'ANESTHÉSISTE': 'IADE', 'BLOC': 'IBODE', 'CADRE': 'CADRE_SANTE' };
+      extracted.metier = norm[extracted.metier.toUpperCase()] || extracted.metier;
     }
 
-    ['specialites', 'services', 'langues', 'formations_complementaires', 'employeurs'].forEach(field => {
-      if (extracted[field] && !Array.isArray(extracted[field])) {
-        extracted[field] = [extracted[field]];
-      }
+    ['specialites', 'services', 'langues', 'formations_complementaires', 'employeurs'].forEach(f => {
+      if (extracted[f] && !Array.isArray(extracted[f])) extracted[f] = [extracted[f]];
     });
 
-    console.log('✅ Extraction réussie :', extracted.nom, '|', extracted.metier, '|', extracted.experience_annees, 'ans');
+    console.log('✅ Extraction :', extracted.nom, '|', extracted.metier, '|', extracted.experience_annees, 'ans');
 
-    // --- Générer le rapport HTML ---
+    // ── Rapport HTML (mobile responsive) ──
     const htmlReport = generateReportHtml(content);
 
-    // --- Email 1 : Rapport au candidat ---
-    let emailStatus = '';
+    // ══════════════════════════════════════════════
+    // EMAIL CANDIDAT — Resend (+ log diagnostic)
+    // ══════════════════════════════════════════════
+    let emailMessage = '';
     if (req.body.user_email) {
-      let emailSent = false;
+      try {
+        const emailRes = await fetch('https://api.resend.com/emails', {
+          method: 'POST',
+          headers: {
+            Authorization: `Bearer ${process.env.RESEND_API_KEY}`,
+            'Content-Type': 'application/json',
+          },
+          body: JSON.stringify({
+            from: 'Audit Suisse Carrière <bonjour@suisse-carriere.com>',
+            to: req.body.user_email,
+            bcc: 'chaborel@gmail.com',
+            subject: `Résultat de votre Audit (${content.score}/100)`,
+            html: htmlReport,
+          }),
+        });
 
-      // Tentative 1 : Resend
-      if (process.env.RESEND_API_KEY) {
-        try {
-          const emailRes = await fetch('https://api.resend.com/emails', {
-            method: 'POST',
-            headers: {
-              Authorization: `Bearer ${process.env.RESEND_API_KEY}`,
-              'Content-Type': 'application/json',
-            },
-            body: JSON.stringify({
-              from: 'Audit Suisse Carrière <bonjour@suisse-carriere.com>',
-              to: req.body.user_email,
-              subject: `Résultat de votre Audit (${content.score}/100)`,
-              html: htmlReport,
-            }),
-          });
-          const emailBody = await emailRes.json();
-          if (!emailRes.ok) {
-            console.error('❌ Resend erreur:', emailRes.status, JSON.stringify(emailBody));
-          } else {
-            console.log('✅ Email Resend envoyé à:', req.body.user_email);
-            emailSent = true;
-          }
-        } catch (e) {
-          console.error('❌ Resend exception:', e.message);
+        // ── FIX : Log détaillé pour diagnostiquer ──
+        const emailBody = await emailRes.json();
+        if (!emailRes.ok) {
+          console.error('❌ RESEND ERREUR:', emailRes.status, JSON.stringify(emailBody));
+          throw new Error(`Resend ${emailRes.status}: ${emailBody.message || JSON.stringify(emailBody)}`);
         }
-      }
+        console.log('✅ Email Resend OK →', req.body.user_email, '| ID:', emailBody.id);
+        emailMessage = `<div style="background:#dcfce7; color:#14532d; padding:12px; border-radius:6px; text-align:center; margin-bottom:30px; border:1px solid #bbf7d0; font-weight:600;">✅ Rapport envoyé à ${req.body.user_email}</div>`;
 
-      // Tentative 2 : Brevo via Make (backup si Resend échoue)
-      if (!emailSent && MAKE_WEBHOOK_URL) {
-        try {
-          await fetch(MAKE_WEBHOOK_URL.replace('/scan-lead', '/email-candidat') || MAKE_WEBHOOK_URL, {
-            method: 'POST',
-            headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({
-              action: 'send_report_email',
-              to_email: req.body.user_email,
-              to_prenom: extracted.nom ? extracted.nom.split(' ')[0] : '',
-              subject: `Votre Audit CV Suisse : ${content.score}/100`,
-              score: content.score,
-              summary: content.summary || '',
-              missing_keywords: content.missing_keywords || [],
-              recommendations: content.recommendations || [],
-              detected_profile: content.detected_profile || '',
-              report_html: htmlReport,
-            }),
-          });
-          console.log('✅ Email backup via Make pour:', req.body.user_email);
-          emailSent = true;
-        } catch (e) {
-          console.error('❌ Make email backup échoué:', e.message);
-        }
+      } catch (e) {
+        console.error('❌ Email non envoyé:', e.message);
+        emailMessage = `<div style="background:#fff7ed; color:#9a3412; padding:12px; border-radius:6px; text-align:center; margin-bottom:30px; border:1px solid #ffedd5; font-size:13px;">⚠️ Email non envoyé (${e.message}), mais voici votre résultat :</div>`;
       }
-
-      emailStatus = emailSent
-        ? `<div style="background:#dcfce7; color:#14532d; padding:12px; border-radius:6px; text-align:center; margin-bottom:30px; border:1px solid #bbf7d0; font-weight:600;">✅ Rapport envoyé à ${req.body.user_email}</div>`
-        : `<div style="background:#fff7ed; color:#9a3412; padding:12px; border-radius:6px; text-align:center; margin-bottom:30px; border:1px solid #ffedd5; font-size:13px;">⚠️ Rapport non envoyé par email — vérifiez votre configuration Resend/Brevo</div>`;
     }
 
-    // --- Email 2 : Fiche profil ADMIN ---
-    try {
-      const adminHtml = generateAdminFicheHtml(extracted, content, req.body.user_email);
-      await fetch('https://api.resend.com/emails', {
-        method: 'POST',
-        headers: {
-          Authorization: `Bearer ${process.env.RESEND_API_KEY}`,
-          'Content-Type': 'application/json',
-        },
-        body: JSON.stringify({
-          from: 'Scanner CV <bonjour@suisse-carriere.com>',
-          to: process.env.ADMIN_EMAIL || 'chaborel@gmail.com',
-          subject: `🆕 Profil extrait : ${extracted.nom || 'Inconnu'} — ${extracted.metier || '?'} — ${content.score}/100`,
-          html: adminHtml,
-        }),
-      });
-      console.log('📧 Fiche admin envoyée pour:', extracted.nom);
-    } catch (e) {
-      console.error('⚠️ Email admin non envoyé:', e.message);
-    }
-
-    // ═══ ENVOI MAKE → Google Sheet + Shopify ═══
+    // ══════════════════════════════════════════════
+    // LEAD → Make → Google Sheet + Shopify + Brevo
+    // ══════════════════════════════════════════════
     await sendCVLeadToMake(extracted, content.score, req.body.user_email);
 
-    // ─── RÉPONSE ───
+    // ── Réponse ──
     if (wantJson) {
       return res.json({
         report: htmlReport,
@@ -631,25 +497,18 @@ app.post('/scan', upload.single('cv_file'), async (req, res) => {
         summary: content.summary || null,
         missing_keywords: content.missing_keywords || [],
         recommendations: content.recommendations || [],
-        email_status: emailStatus,
+        email_status: emailMessage,
       });
     }
 
-    res.send(emailStatus + htmlReport);
+    res.send(emailMessage + htmlReport);
 
   } catch (error) {
     console.error('❌ Erreur Backend:', error);
     const isTimeout = error.name === 'AbortError';
-    const msg = isTimeout
-      ? 'L\'analyse a pris trop de temps (>60s). Réessayez avec un PDF plus léger.'
-      : error.message;
-    if (wantJson) {
-      return res.status(500).json({
-        error: msg,
-        report: `<div style="color:red; text-align:center; padding:20px;">Erreur technique : ${msg}</div>`,
-      });
-    }
-    res.status(500).send(`<div style="color:red; text-align:center; padding:20px;">Erreur technique : ${msg}</div>`);
+    const msg = isTimeout ? 'Analyse trop longue (>60s). Réessayez.' : error.message;
+    if (wantJson) return res.status(500).json({ error: msg });
+    res.status(500).send(`<div style="color:red; text-align:center; padding:20px;">Erreur : ${msg}</div>`);
   }
 });
 
@@ -709,107 +568,9 @@ Génère la lettre complète, prête à être copiée et envoyée.`;
     }
 
     const letter = aiJson.choices[0].message.content;
-
-    res.json({
-      success: true,
-      letter: letter,
-    });
+    res.json({ success: true, letter: letter });
   } catch (error) {
     console.error('❌ Erreur génération lettre:', error);
-    res.status(500).json({
-      success: false,
-      error: error.message,
-    });
-  }
-});
-
-// ═══════════════════════════════════════════════════════════════
-// ROUTE 4 : PROFIL CANDIDAT COMPLET
-// ═══════════════════════════════════════════════════════════════
-app.post('/profile/merge', (req, res) => {
-  try {
-    const { scannerData = {}, extractedData = {}, cvScore = null } = req.body;
-
-    const profile = {
-      nom: extractedData.nom || null,
-      email: extractedData.email || scannerData.email || null,
-      telephone: extractedData.telephone || null,
-      metier: extractedData.metier || scannerData.metier || null,
-      diplome_principal: extractedData.diplome_principal || null,
-      annee_diplome: extractedData.annee_diplome || null,
-      experience_annees: extractedData.experience_annees || scannerData.experience_tranche || null,
-      specialites: extractedData.specialites || [],
-      services: extractedData.services || [],
-      employeurs: extractedData.employeurs || [],
-      langues: extractedData.langues || [],
-      formations_complementaires: extractedData.formations_complementaires || [],
-      mention_crs: extractedData.mention_crs || false,
-      statut_crs: extractedData.statut_crs !== 'non_mentionné'
-        ? extractedData.statut_crs
-        : (scannerData.statut_crs || 'non_mentionné'),
-      statut: scannerData.statut || 'frontalier',
-      zone_cible: scannerData.zone || scannerData.canton || 'indecis',
-      situation_familiale: scannerData.situation || null,
-      disponibilite: extractedData.disponibilite !== 'non_mentionnée'
-        ? extractedData.disponibilite
-        : (scannerData.disponibilite || null),
-      cv_score: cvScore,
-      a_photo: extractedData.a_photo || false,
-      references_mentionnees: extractedData.references_mentionnees || false,
-      ville_actuelle: extractedData.ville_actuelle || null,
-      date_creation: new Date().toISOString(),
-      source: 'suisse-carriere.com',
-    };
-
-    const metierLabels = {
-      AS: 'Aide-Soignant(e)', IDE: 'Infirmier(e) DE', IADE: 'IADE',
-      IBODE: 'IBODE', SF: 'Sage-Femme', TECH: 'Technicien(ne)',
-      CADRE_SANTE: 'Cadre de Santé', EXECUTIVE: 'Profil Executive',
-    };
-
-    const statutLabels = { frontalier: 'Frontalier (Permis G)', resident: 'Résident (Permis B)' };
-    const crsLabels = { obtenue: '✅ CRS obtenue', en_cours: '⏳ CRS en cours', 'non_mentionné': '❌ CRS non mentionnée' };
-    const zoneLabels = { geneve: 'Genève', vaud: 'Vaud', valais: 'Valais', indecis: 'À définir' };
-
-    const ficheAgence = [
-      `═══ FICHE PROFIL CANDIDAT ═══`,
-      ``,
-      `Nom : ${profile.nom || '—'}`,
-      `Métier : ${metierLabels[profile.metier] || profile.metier || '—'}`,
-      `Diplôme : ${profile.diplome_principal || '—'}${profile.annee_diplome ? ' (' + profile.annee_diplome + ')' : ''}`,
-      `Expérience : ${profile.experience_annees ? profile.experience_annees + ' ans' : '—'}`,
-      `Spécialités : ${profile.specialites.length ? profile.specialites.join(', ') : '—'}`,
-      `Services maîtrisés : ${profile.services.length ? profile.services.join(', ') : '—'}`,
-      `Langues : ${profile.langues.length ? profile.langues.join(', ') : '—'}`,
-      ``,
-      `Statut CRS : ${crsLabels[profile.statut_crs] || '—'}`,
-      `Projet : ${statutLabels[profile.statut] || '—'}`,
-      `Zone cible : ${zoneLabels[profile.zone_cible] || profile.zone_cible || '—'}`,
-      `Disponibilité : ${profile.disponibilite || '—'}`,
-      `Situation : ${profile.situation_familiale || '—'}`,
-      ``,
-      `Contact : ${profile.email || '—'} | ${profile.telephone || '—'}`,
-      `Localisation actuelle : ${profile.ville_actuelle || '—'}`,
-      `Score CV : ${profile.cv_score ? profile.cv_score + '/100' : '—'}`,
-      ``,
-      `Derniers postes :`,
-      ...(profile.employeurs.length
-        ? profile.employeurs.slice(0, 3).map(e =>
-            `  • ${e.poste || '—'} — ${e.nom || '—'}${e.service ? ' (' + e.service + ')' : ''} — ${e.debut || '?'} → ${e.fin || '?'}`)
-        : ['  Aucun poste extrait']),
-      ``,
-      `Généré le ${new Date().toLocaleDateString('fr-FR')} — suisse-carriere.com`,
-    ].join('\n');
-
-    console.log('✅ Profil fusionné :', profile.nom, '|', profile.metier, '|', profile.zone_cible);
-
-    res.json({
-      success: true,
-      profile: profile,
-      ficheAgence: ficheAgence,
-    });
-  } catch (error) {
-    console.error('❌ Erreur merge profil:', error);
     res.status(500).json({ success: false, error: error.message });
   }
 });
@@ -821,7 +582,7 @@ const PORT = process.env.PORT || 3000;
 app.listen(PORT, () => console.log(`🚀 Backend Suisse Carrière v2 prêt sur port ${PORT}`));
 
 // ═══════════════════════════════════════════════════════════════
-// FONCTION DESIGN RAPPORT HTML
+// RAPPORT HTML — Mobile Responsive
 // ═══════════════════════════════════════════════════════════════
 function generateReportHtml(data) {
   const color = data.score >= 70 ? '#10b981' : data.score >= 40 ? '#f59e0b' : '#ef4444';
@@ -830,212 +591,65 @@ function generateReportHtml(data) {
 
   return `
     <style>
-      .sc-report { font-family: 'Inter', Helvetica, sans-serif; max-width: 700px; margin: 0 auto; background: white; border: 1px solid #e2e8f0; border-radius: 12px; overflow: hidden; box-shadow: 0 10px 15px -3px rgba(0, 0, 0, 0.05); }
-      .sc-report * { box-sizing: border-box; }
-      .sc-report-hdr { background: #0f172a; color: white; padding: 32px 24px; text-align: center; }
-      .sc-report-hdr h2 { margin: 0; font-weight: 800; letter-spacing: -0.5px; font-size: 22px; }
-      .sc-report-hdr p { margin: 5px 0 0; opacity: 0.8; font-size: 13px; text-transform: uppercase; letter-spacing: 1px; }
-      .sc-report-body { padding: 24px; }
-      .sc-report-score { text-align: center; margin-bottom: 32px; padding-bottom: 24px; border-bottom: 1px solid #f1f5f9; }
-      .sc-report-score-num { font-size: 64px; font-weight: 900; color: ${color}; line-height: 1; letter-spacing: -2px; }
-      .sc-report-score-num span { font-size: 28px; color: #cbd5e1; font-weight: 600; }
-      .sc-report-score-label { text-transform: uppercase; font-size: 11px; color: #64748b; margin-top: 12px; font-weight: 700; letter-spacing: 1px; }
-      .sc-report-verdict { background: #f8fafc; padding: 20px; border-left: 4px solid #0f172a; margin-bottom: 32px; border-radius: 0 8px 8px 0; }
-      .sc-report-verdict strong { color: #0f172a; display: block; margin-bottom: 6px; font-size: 13px; text-transform: uppercase; }
-      .sc-report-verdict span { line-height: 1.6; color: #334155; font-size: 14px; }
-      .sc-report-cols { margin-bottom: 32px; }
-      .sc-report-col { margin-bottom: 24px; }
-      .sc-report-col h3 { padding-bottom: 8px; font-size: 15px; margin-top: 0; margin-bottom: 10px; }
-      .sc-report-col ul { padding-left: 18px; color: #475569; font-size: 13px; line-height: 1.7; margin: 0; }
-      .sc-report-col ul li { margin-bottom: 5px; }
-      .sc-report-cta { text-align: center; background: #fff0f3; padding: 24px; border-radius: 8px; border: 1px solid #ffc9d6; margin-top: 32px; }
-      .sc-report-cta h3 { color: #be123c; margin-top: 0; font-size: 18px; margin-bottom: 12px; }
-      .sc-report-cta p { margin-bottom: 20px; color: #555; font-size: 13px; line-height: 1.5; }
-      .sc-report-cta a { background: #d90429; color: white; text-decoration: none; padding: 14px 28px; border-radius: 6px; font-weight: bold; display: inline-block; font-size: 14px; }
-      .sc-report-footer { margin-top: 32px; text-align: center; font-size: 11px; color: #94a3b8; border-top: 1px solid #f1f5f9; padding-top: 16px; }
-      @media (min-width: 600px) {
-        .sc-report-body { padding: 40px; }
-        .sc-report-hdr { padding: 40px; }
-        .sc-report-cols { display: flex; gap: 32px; }
-        .sc-report-col { flex: 1; margin-bottom: 0; }
-        .sc-report-score-num { font-size: 72px; }
+      .sc-rpt,.sc-rpt *{box-sizing:border-box}
+      .sc-rpt{font-family:'Inter',Helvetica,sans-serif;max-width:700px;margin:0 auto;background:#fff;border:1px solid #e2e8f0;border-radius:12px;overflow:hidden}
+      .sc-rpt-h{background:#0f172a;color:#fff;padding:28px 20px;text-align:center}
+      .sc-rpt-h h2{margin:0;font-weight:800;font-size:20px}
+      .sc-rpt-h p{margin:5px 0 0;opacity:.8;font-size:12px;text-transform:uppercase;letter-spacing:1px}
+      .sc-rpt-b{padding:20px}
+      .sc-rpt-sc{text-align:center;margin-bottom:28px;padding-bottom:20px;border-bottom:1px solid #f1f5f9}
+      .sc-rpt-num{font-size:56px;font-weight:900;color:${color};line-height:1}
+      .sc-rpt-num span{font-size:24px;color:#cbd5e1;font-weight:600}
+      .sc-rpt-lbl{text-transform:uppercase;font-size:11px;color:#64748b;margin-top:10px;font-weight:700;letter-spacing:1px}
+      .sc-rpt-v{background:#f8fafc;padding:18px;border-left:4px solid #0f172a;margin-bottom:28px;border-radius:0 8px 8px 0}
+      .sc-rpt-v strong{color:#0f172a;display:block;margin-bottom:6px;font-size:12px;text-transform:uppercase}
+      .sc-rpt-v span{line-height:1.6;color:#334155;font-size:13px}
+      .sc-rpt-cols{margin-bottom:28px}
+      .sc-rpt-col{margin-bottom:20px}
+      .sc-rpt-col h3{padding-bottom:8px;font-size:14px;margin:0 0 8px}
+      .sc-rpt-col ul{padding-left:16px;color:#475569;font-size:13px;line-height:1.7;margin:0}
+      .sc-rpt-col li{margin-bottom:4px}
+      .sc-rpt-cta{text-align:center;background:#fff0f3;padding:20px;border-radius:8px;border:1px solid #ffc9d6;margin-top:28px}
+      .sc-rpt-cta h3{color:#be123c;margin:0 0 8px;font-size:17px}
+      .sc-rpt-cta p{margin:0 0 16px;color:#555;font-size:13px;line-height:1.5}
+      .sc-rpt-cta a{background:#d90429;color:#fff!important;text-decoration:none;padding:12px 24px;border-radius:6px;font-weight:700;display:inline-block;font-size:14px}
+      .sc-rpt-ft{margin-top:28px;text-align:center;font-size:11px;color:#94a3b8;border-top:1px solid #f1f5f9;padding-top:14px}
+      @media(min-width:600px){
+        .sc-rpt-h{padding:40px}.sc-rpt-b{padding:40px}
+        .sc-rpt-h h2{font-size:24px}.sc-rpt-num{font-size:72px}
+        .sc-rpt-cols{display:flex;gap:32px}.sc-rpt-col{flex:1;margin-bottom:0}
       }
     </style>
-    <div class="sc-report">
-      <div class="sc-report-hdr">
+    <div class="sc-rpt">
+      <div class="sc-rpt-h">
         <h2>Audit de Conformité Suisse 🇨🇭</h2>
         <p>Profil détecté : ${data.detected_profile || 'Non spécifié'}</p>
       </div>
-      <div class="sc-report-body">
-        <div class="sc-report-score">
-          <div class="sc-report-score-num">
-            ${data.score}<span>/100</span>
-          </div>
-          <div class="sc-report-score-label">Score de Compatibilité</div>
+      <div class="sc-rpt-b">
+        <div class="sc-rpt-sc">
+          <div class="sc-rpt-num">${data.score}<span>/100</span></div>
+          <div class="sc-rpt-lbl">Score de Compatibilité</div>
         </div>
-        <div class="sc-report-verdict">
+        <div class="sc-rpt-v">
           <strong>Verdict de l'IA</strong>
           <span>${data.summary}</span>
         </div>
-        <div class="sc-report-cols">
-          <div class="sc-report-col">
-            <h3 style="color: #ef4444; border-bottom: 2px solid #fee2e2;">🚩 Points Bloquants</h3>
-            <ul>
-              ${redFlags.map((k) => `<li>${k}</li>`).join('')}
-            </ul>
+        <div class="sc-rpt-cols">
+          <div class="sc-rpt-col">
+            <h3 style="color:#ef4444;border-bottom:2px solid #fee2e2">🚩 Points Bloquants</h3>
+            <ul>${redFlags.map(k => '<li>' + k + '</li>').join('')}</ul>
           </div>
-          <div class="sc-report-col">
-            <h3 style="color: #10b981; border-bottom: 2px solid #dcfce7;">✅ Points Forts</h3>
-            <ul>
-              ${greenPoints.map((r) => `<li>${r}</li>`).join('')}
-            </ul>
+          <div class="sc-rpt-col">
+            <h3 style="color:#10b981;border-bottom:2px solid #dcfce7">✅ Points Forts</h3>
+            <ul>${greenPoints.map(r => '<li>' + r + '</li>').join('')}</ul>
           </div>
         </div>
-        <div class="sc-report-cta">
+        <div class="sc-rpt-cta">
           <h3>Ne laissez pas l'ATS rejeter ce CV.</h3>
-          <p>Votre profil a du potentiel mais ne respecte pas les codes suisses. Obtenez les outils pour corriger ça.</p>
+          <p>Votre profil a du potentiel mais ne respecte pas les codes suisses.</p>
           <a href="https://suisse-carriere.com" target="_blank">👉 Voir les Packs de correction</a>
         </div>
-        <div class="sc-report-footer">
-          Généré par Suisse Carrière Intelligence v2
-        </div>
-      </div>
-    </div>
-  `;
-}
-
-// ═══════════════════════════════════════════════════════════════
-// FICHE PROFIL ADMIN (email envoyé à toi uniquement)
-// ═══════════════════════════════════════════════════════════════
-function generateAdminFicheHtml(extracted, auditData, candidatEmail) {
-  const e = extracted || {};
-  const score = auditData.score || 0;
-  const scoreColor = score >= 70 ? '#10b981' : score >= 40 ? '#f59e0b' : '#ef4444';
-
-  const metierLabels = {
-    AS: 'Aide-Soignant(e)', IDE: 'Infirmier(e) DE', IADE: 'IADE', IBODE: 'IBODE',
-    SF: 'Sage-Femme', TECH: 'Technicien(ne)', CADRE_SANTE: 'Cadre de Santé',
-    EXECUTIVE: 'Executive', AUTRE: 'Autre'
-  };
-
-  const crsDisplay = e.statut_crs === 'obtenue'
-    ? '<span style="color:#10b981;font-weight:700;">✅ Obtenue</span>'
-    : e.statut_crs === 'en_cours'
-    ? '<span style="color:#f59e0b;font-weight:700;">⏳ En cours</span>'
-    : '<span style="color:#ef4444;font-weight:700;">❌ Non mentionnée</span>';
-
-  const employeursHtml = (e.employeurs && e.employeurs.length)
-    ? e.employeurs.map(emp =>
-        `<tr>
-          <td style="padding:8px 12px;border-bottom:1px solid #f1f5f9;font-size:13px;">${emp.poste || '—'}</td>
-          <td style="padding:8px 12px;border-bottom:1px solid #f1f5f9;font-size:13px;">${emp.nom || '—'}</td>
-          <td style="padding:8px 12px;border-bottom:1px solid #f1f5f9;font-size:13px;">${emp.service || '—'}</td>
-          <td style="padding:8px 12px;border-bottom:1px solid #f1f5f9;font-size:13px;">${emp.debut || '?'} → ${emp.fin || '?'}</td>
-        </tr>`
-      ).join('')
-    : '<tr><td colspan="4" style="padding:8px 12px;color:#94a3b8;font-size:13px;">Aucun poste extrait</td></tr>';
-
-  return `
-    <div style="font-family:'Inter',Helvetica,sans-serif;max-width:700px;margin:0 auto;background:white;">
-      <div style="background:#0f172a;color:white;padding:30px;text-align:center;">
-        <h1 style="margin:0;font-size:20px;font-weight:800;">🆕 Nouveau Profil Extrait</h1>
-        <p style="margin:8px 0 0;opacity:0.7;font-size:13px;">${new Date().toLocaleDateString('fr-FR', { weekday: 'long', year: 'numeric', month: 'long', day: 'numeric', hour: '2-digit', minute: '2-digit' })}</p>
-      </div>
-
-      <div style="padding:30px;">
-        <div style="display:flex;gap:24px;margin-bottom:30px;align-items:center;">
-          <div style="text-align:center;flex-shrink:0;">
-            <div style="font-size:48px;font-weight:900;color:${scoreColor};line-height:1;">${score}</div>
-            <div style="font-size:11px;color:#94a3b8;text-transform:uppercase;font-weight:700;">/100</div>
-          </div>
-          <div style="flex:1;">
-            <div style="font-size:22px;font-weight:800;color:#0f172a;margin-bottom:4px;">${e.nom || 'Nom inconnu'}</div>
-            <div style="font-size:15px;color:#475569;margin-bottom:8px;">${metierLabels[e.metier] || e.metier || '—'} — ${e.experience_annees ? e.experience_annees + ' ans d\'exp.' : 'Exp. inconnue'}</div>
-            <div style="display:flex;gap:12px;flex-wrap:wrap;">
-              ${e.email ? `<span style="font-size:12px;background:#f1f5f9;padding:4px 10px;border-radius:4px;">📧 ${e.email}</span>` : ''}
-              ${e.telephone ? `<span style="font-size:12px;background:#f1f5f9;padding:4px 10px;border-radius:4px;">📱 ${e.telephone}</span>` : ''}
-              ${e.ville_actuelle ? `<span style="font-size:12px;background:#f1f5f9;padding:4px 10px;border-radius:4px;">📍 ${e.ville_actuelle}${e.departement ? ' (' + e.departement + ')' : ''}</span>` : ''}
-            </div>
-          </div>
-        </div>
-
-        <table style="width:100%;border-collapse:collapse;margin-bottom:24px;background:#f8fafc;border-radius:8px;overflow:hidden;">
-          <tr>
-            <td style="padding:12px 16px;font-size:13px;font-weight:700;color:#64748b;width:40%;border-bottom:1px solid #e2e8f0;">Diplôme</td>
-            <td style="padding:12px 16px;font-size:13px;border-bottom:1px solid #e2e8f0;">${e.diplome_principal || '—'}${e.annee_diplome ? ' (' + e.annee_diplome + ')' : ''}</td>
-          </tr>
-          <tr>
-            <td style="padding:12px 16px;font-size:13px;font-weight:700;color:#64748b;border-bottom:1px solid #e2e8f0;">Reconnaissance CRS</td>
-            <td style="padding:12px 16px;font-size:13px;border-bottom:1px solid #e2e8f0;">${crsDisplay}</td>
-          </tr>
-          <tr>
-            <td style="padding:12px 16px;font-size:13px;font-weight:700;color:#64748b;border-bottom:1px solid #e2e8f0;">Spécialités</td>
-            <td style="padding:12px 16px;font-size:13px;border-bottom:1px solid #e2e8f0;">${e.specialites && e.specialites.length ? e.specialites.join(', ') : '—'}</td>
-          </tr>
-          <tr>
-            <td style="padding:12px 16px;font-size:13px;font-weight:700;color:#64748b;border-bottom:1px solid #e2e8f0;">Services</td>
-            <td style="padding:12px 16px;font-size:13px;border-bottom:1px solid #e2e8f0;">${e.services && e.services.length ? e.services.join(', ') : '—'}</td>
-          </tr>
-          <tr>
-            <td style="padding:12px 16px;font-size:13px;font-weight:700;color:#64748b;border-bottom:1px solid #e2e8f0;">Langues</td>
-            <td style="padding:12px 16px;font-size:13px;border-bottom:1px solid #e2e8f0;">${e.langues && e.langues.length ? e.langues.join(', ') : '—'}</td>
-          </tr>
-          <tr>
-            <td style="padding:12px 16px;font-size:13px;font-weight:700;color:#64748b;border-bottom:1px solid #e2e8f0;">Formations comp.</td>
-            <td style="padding:12px 16px;font-size:13px;border-bottom:1px solid #e2e8f0;">${e.formations_complementaires && e.formations_complementaires.length ? e.formations_complementaires.join(', ') : '—'}</td>
-          </tr>
-          <tr>
-            <td style="padding:12px 16px;font-size:13px;font-weight:700;color:#64748b;border-bottom:1px solid #e2e8f0;">Disponibilité</td>
-            <td style="padding:12px 16px;font-size:13px;border-bottom:1px solid #e2e8f0;">${e.disponibilite || '—'}</td>
-          </tr>
-          <tr>
-            <td style="padding:12px 16px;font-size:13px;font-weight:700;color:#64748b;">Qualité CV</td>
-            <td style="padding:12px 16px;font-size:13px;">Photo: ${e.a_photo ? '✅' : '❌'} | Réf: ${e.references_mentionnees ? '✅' : '❌'} | ~${e.nombre_pages_estime || '?'} page(s)</td>
-          </tr>
-        </table>
-
-        <h3 style="font-size:14px;font-weight:800;color:#0f172a;text-transform:uppercase;margin-bottom:12px;">📋 Parcours professionnel</h3>
-        <table style="width:100%;border-collapse:collapse;margin-bottom:24px;">
-          <thead>
-            <tr style="background:#f1f5f9;">
-              <th style="padding:8px 12px;text-align:left;font-size:12px;font-weight:700;color:#64748b;">Poste</th>
-              <th style="padding:8px 12px;text-align:left;font-size:12px;font-weight:700;color:#64748b;">Établissement</th>
-              <th style="padding:8px 12px;text-align:left;font-size:12px;font-weight:700;color:#64748b;">Service</th>
-              <th style="padding:8px 12px;text-align:left;font-size:12px;font-weight:700;color:#64748b;">Période</th>
-            </tr>
-          </thead>
-          <tbody>${employeursHtml}</tbody>
-        </table>
-
-        <div style="background:#fffbeb;border:1px solid #fde68a;border-radius:8px;padding:16px;margin-bottom:24px;">
-          <div style="font-weight:700;font-size:13px;color:#92400e;margin-bottom:6px;">🤖 Verdict IA</div>
-          <p style="font-size:13px;color:#78350f;margin:0;line-height:1.5;">${auditData.summary || '—'}</p>
-        </div>
-
-        <div style="display:grid;grid-template-columns:1fr 1fr;gap:20px;margin-bottom:24px;">
-          <div>
-            <div style="font-weight:700;font-size:12px;color:#ef4444;margin-bottom:8px;">🚩 RED FLAGS</div>
-            <ul style="margin:0;padding-left:16px;font-size:12px;color:#475569;line-height:1.8;">
-              ${(auditData.missing_keywords || []).map(k => `<li>${k}</li>`).join('')}
-            </ul>
-          </div>
-          <div>
-            <div style="font-weight:700;font-size:12px;color:#10b981;margin-bottom:8px;">✅ POINTS FORTS</div>
-            <ul style="margin:0;padding-left:16px;font-size:12px;color:#475569;line-height:1.8;">
-              ${(auditData.recommendations || []).map(r => `<li>${r}</li>`).join('')}
-            </ul>
-          </div>
-        </div>
-
-        <div style="background:#f0fdf4;border:1px solid #bbf7d0;border-radius:8px;padding:16px;text-align:center;">
-          <div style="font-weight:700;font-size:13px;color:#14532d;margin-bottom:8px;">⚡ Actions rapides</div>
-          ${candidatEmail ? `<a href="mailto:${candidatEmail}" style="display:inline-block;background:#0f172a;color:white;text-decoration:none;padding:10px 20px;border-radius:6px;font-size:13px;font-weight:600;margin:4px;">📧 Contacter le candidat</a>` : ''}
-          ${e.telephone ? `<a href="tel:${e.telephone}" style="display:inline-block;background:#0f172a;color:white;text-decoration:none;padding:10px 20px;border-radius:6px;font-size:13px;font-weight:600;margin:4px;">📱 Appeler</a>` : ''}
-        </div>
-
-        <div style="margin-top:24px;text-align:center;font-size:11px;color:#94a3b8;border-top:1px solid #f1f5f9;padding-top:16px;">
-          Suisse Carrière Intelligence v2 — Email réservé admin
-        </div>
+        <div class="sc-rpt-ft">Généré par Suisse Carrière Intelligence v2</div>
       </div>
     </div>
   `;
