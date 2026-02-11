@@ -199,10 +199,42 @@ Règles d'extraction :
 MÉDICAL (Infirmier, AS, IADE, SF, Tech) ou EXECUTIVE (Finance, Manager, IT).
 
 ═══════════════════════════════════════
-ÉTAPE 3 : AUDIT QUALITÉ
+ÉTAPE 3 : AUDIT QUALITÉ — SOIS EXIGEANT
 ═══════════════════════════════════════
->> SI MÉDICAL : Critique CRS (alerte rouge si absent), compétences techniques, format CV.
->> SI EXECUTIVE : Critique chiffres/KPIs (alerte rouge si absents), style factuel.
+Tu joues le rôle d'un recruteur suisse TRÈS exigeant. Ton travail est de trouver les failles.
+CHAQUE CV a des problèmes — même les bons. Trouve-en au moins 3.
+
+GRILLE D'AUDIT OBLIGATOIRE — vérifie CHAQUE point et signale ce qui manque :
+
+>> TOUS LES PROFILS :
+- ❌ Pas de photo professionnelle ? → Bloquant en Suisse (90% des CV suisses en ont une)
+- ❌ Plus de 2 pages ? → Trop long pour les recruteurs suisses
+- ❌ Pas de références mentionnées ? → Les Suisses vérifient toujours, c'est suspect
+- ❌ Pas d'adresse complète ? → Le recruteur ne sait pas si le candidat est frontalier
+- ❌ Pas de langues mentionnées (ou pas de niveau) ? → L'allemand est un plus même en Suisse romande
+- ❌ Trous dans le parcours ? → Signale-les
+- ❌ Pas de formations continues récentes ? → Montre un manque de mise à jour
+- ❌ Mise en page non professionnelle, fautes, incohérences de dates ?
+
+>> SI MÉDICAL (en plus) :
+- ❌ Pas de mention Croix-Rouge / CRS / PreCheck / NAREG ? → ALERTE ROUGE MAJEURE : impossible d'exercer sans
+- ❌ Pas de spécialité en tension (Réa, Urgences, Bloc) ? → Moins attractif
+- ❌ Compétences vagues ("soins divers", "polyvalente") sans détails précis ? → Insuffisant
+- ❌ Pas de mention d'équipements/protocoles spécifiques ? → Les recruteurs veulent du concret
+
+>> SI EXECUTIVE (en plus) :
+- ❌ Aucun chiffre / KPI / résultat mesurable ? → ALERTE ROUGE : le CV est creux
+- ❌ Style trop narratif / littéraire ? → Doit être factuel, en bullet points
+- ❌ Pas de budget géré, taille d'équipe, CA ? → Difficile d'évaluer le niveau
+
+RÈGLE ABSOLUE : "missing_keywords" doit contenir MINIMUM 3 points bloquants. JAMAIS un tableau vide.
+Même un excellent CV a des choses à améliorer. Sois constructif mais exigeant.
+
+Le score reflète la sévérité :
+- 80+ : Excellent, presque prêt (rare)
+- 60-79 : Bon mais des corrections nécessaires
+- 40-59 : Moyen, travail sérieux à faire
+- <40 : Insuffisant pour le marché suisse
 
 ═══════════════════════════════════════
 ÉTAPE 4 : JSON STRICT
@@ -232,9 +264,16 @@ MÉDICAL (Infirmier, AS, IADE, SF, Tech) ou EXECUTIVE (Finance, Manager, IT).
   },
   "score": 65,
   "detected_profile": "MÉDICAL",
-  "summary": "J'ai analysé votre profil... (3-4 phrases max)",
-  "missing_keywords": ["Red Flag 1", "Red Flag 2", "Red Flag 3"],
-  "recommendations": ["Point Fort 1", "Point Fort 2", "Conseil"]
+  "summary": "J'ai analysé votre profil... verdict en 3-4 phrases. Mentionne le score et les problèmes principaux.",
+  "missing_keywords": [
+    "TOUJOURS 3 à 5 points bloquants — JAMAIS vide",
+    "Sois SPÉCIFIQUE : pas 'améliorer le CV' mais 'Aucune mention de la reconnaissance CRS'",
+    "Chaque point commence par un verbe d'action ou un constat factuel"
+  ],
+  "recommendations": [
+    "2 à 4 points forts CONCRETS trouvés dans le CV",
+    "Termine par 1 conseil actionnable pour améliorer le score"
+  ]
 }
 `;
 
@@ -442,6 +481,21 @@ app.post('/scan', upload.single('cv_file'), async (req, res) => {
     });
 
     console.log('✅ Extraction :', extracted.nom, '|', extracted.metier, '|', extracted.experience_annees, 'ans');
+
+    // ── Filet de sécurité : TOUJOURS des points bloquants ──
+    if (!content.missing_keywords || content.missing_keywords.length === 0) {
+      console.log('⚠️ IA n\'a pas trouvé de red flags — génération automatique');
+      const autoFlags = [];
+      if (!extracted.mention_crs) autoFlags.push('Aucune mention de la reconnaissance Croix-Rouge suisse (CRS) — étape obligatoire pour exercer en Suisse');
+      if (!extracted.a_photo) autoFlags.push('Pas de photo professionnelle — 90% des CV suisses en incluent une, son absence peut éliminer votre candidature');
+      if (!extracted.references_mentionnees) autoFlags.push('Aucune référence professionnelle mentionnée — les recruteurs suisses vérifient systématiquement');
+      if (!extracted.disponibilite || extracted.disponibilite === 'non_mentionnée') autoFlags.push('Disponibilité non précisée — le recruteur ne sait pas quand vous pouvez commencer');
+      if (!extracted.langues || extracted.langues.length === 0) autoFlags.push('Aucune langue mentionnée avec niveau — précisez vos niveaux (B2, C1) selon le CECR');
+      if ((extracted.nombre_pages_estime || 0) > 2) autoFlags.push('CV trop long (' + extracted.nombre_pages_estime + ' pages) — les recruteurs suisses préfèrent 2 pages maximum');
+      if (extracted.experience_annees && extracted.experience_annees < 2) autoFlags.push('Expérience limitée (' + extracted.experience_annees + ' an) — mettez en avant vos stages et formations complémentaires');
+      if (autoFlags.length < 3) autoFlags.push('Ajoutez des détails sur les équipements et protocoles maîtrisés — les recruteurs suisses veulent du concret');
+      content.missing_keywords = autoFlags.slice(0, 5);
+    }
 
     // ── Rapport HTML (mobile responsive) ──
     const htmlReport = generateReportHtml(content);
