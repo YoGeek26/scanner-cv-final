@@ -22,6 +22,8 @@ const upload = multer({ storage: multer.memoryStorage() });
 
 app.use(cors());
 app.use(express.json());
+// ═══ API POSTES ═══
+require('./jobs_routes')(app);
 
 // --- FONCTION D'EXTRACTION PDF ---
 async function extractTextFromPDF(buffer) {
