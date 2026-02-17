@@ -1,66 +1,90 @@
 // ═══════════════════════════════════════════════════════════════
-// SUISSE CARRIÈRE — ROUTES API POSTES (Express.js)
+// SUISSE CARRIÈRE — ROUTES API POSTES (Express.js) v2
 // ═══════════════════════════════════════════════════════════════
 // GET  /jobs         → Liste des postes (pour le frontend)
 // POST /jobs/sync    → Reçoit les postes du scraper Python
 // POST /interest     → Enregistre un intérêt candidat
+// GET  /health       → Keep-alive pour UptimeRobot (anti-sleep)
+//
+// FIX v2: Double stockage mémoire + fichier.
+// Render Free efface le disque au sleep → on garde les jobs en
+// mémoire tant que le serveur tourne, ET sur disque en backup.
+// Un pinger externe (UptimeRobot) empêche le sleep.
 // ═══════════════════════════════════════════════════════════════
 
 const fs = require('fs');
 const path = require('path');
 
-// ─── Fichier JSON simple (pas besoin de SQLite) ───
+// ─── Fichier JSON backup ───
 const JOBS_FILE = path.join(__dirname, 'jobs_data.json');
 const INTERESTS_FILE = path.join(__dirname, 'interests_data.json');
 const SYNC_SECRET = process.env.SYNC_SECRET || 'changez-moi';
 
-// ─── Helpers ───
-function readJobs() {
+// ─── STOCKAGE EN MÉMOIRE (survit tant que le process tourne) ───
+let jobsCache = { jobs: [], updated: null };
+let interestsCache = [];
+let lastSyncTime = null;
+let serverStartTime = new Date().toISOString();
+
+// ─── Init: charger depuis le fichier au démarrage (si existe) ───
+function initFromFile() {
   try {
     if (fs.existsSync(JOBS_FILE)) {
-      return JSON.parse(fs.readFileSync(JOBS_FILE, 'utf-8'));
+      const data = JSON.parse(fs.readFileSync(JOBS_FILE, 'utf-8'));
+      if (data.jobs && data.jobs.length > 0) {
+        jobsCache = data;
+        lastSyncTime = data.updated;
+        console.log(`📂 Jobs chargés depuis fichier: ${data.jobs.length} postes (synced: ${data.updated})`);
+        return;
+      }
     }
   } catch (e) {
-    console.error('Erreur lecture jobs:', e.message);
+    console.error('⚠️ Erreur lecture fichier jobs:', e.message);
   }
-  return { jobs: [], updated: null };
+  console.log('📂 Aucun fichier jobs_data.json trouvé — en attente du prochain sync scraper');
 }
 
-function writeJobs(data) {
-  fs.writeFileSync(JOBS_FILE, JSON.stringify(data, null, 2), 'utf-8');
-}
+// Charger au démarrage
+initFromFile();
 
-function readInterests() {
+// ─── Helpers: écriture fichier (best-effort, non bloquant) ───
+function saveToDisk() {
   try {
-    if (fs.existsSync(INTERESTS_FILE)) {
-      return JSON.parse(fs.readFileSync(INTERESTS_FILE, 'utf-8'));
-    }
+    fs.writeFileSync(JOBS_FILE, JSON.stringify(jobsCache, null, 2), 'utf-8');
   } catch (e) {
-    console.error('Erreur lecture interests:', e.message);
+    console.warn('⚠️ Impossible d\'écrire jobs_data.json:', e.message);
   }
-  return [];
 }
 
-function writeInterests(data) {
-  fs.writeFileSync(INTERESTS_FILE, JSON.stringify(data, null, 2), 'utf-8');
+function saveInterestsToDisk() {
+  try {
+    fs.writeFileSync(INTERESTS_FILE, JSON.stringify(interestsCache, null, 2), 'utf-8');
+  } catch (e) {
+    console.warn('⚠️ Impossible d\'écrire interests_data.json:', e.message);
+  }
 }
 
 // ═══════════════════════════════════════════════════════════════
 // ROUTE 1 : GET /jobs — Le frontend appelle ça
 // ═══════════════════════════════════════════════════════════════
 function getJobs(req, res) {
-  const data = readJobs();
-
   // Filtrer les postes de moins de 30 jours
   const cutoff = new Date(Date.now() - 30 * 24 * 60 * 60 * 1000).toISOString();
-  const activeJobs = (data.jobs || []).filter(j => {
+  const activeJobs = (jobsCache.jobs || []).filter(j => {
     return (j.last_seen || j.first_seen || '') > cutoff;
   });
+
+  console.log(`📡 GET /jobs → ${activeJobs.length} postes actifs (${jobsCache.jobs.length} total en mémoire)`);
 
   res.json({
     jobs: activeJobs,
     count: activeJobs.length,
-    updated: data.updated || new Date().toISOString(),
+    updated: jobsCache.updated || new Date().toISOString(),
+    _meta: {
+      server_start: serverStartTime,
+      last_sync: lastSyncTime,
+      total_in_memory: jobsCache.jobs.length,
+    }
   });
 }
 
@@ -71,6 +95,7 @@ function syncJobs(req, res) {
   // Vérifier le secret
   const token = req.headers['x-sync-token'] || '';
   if (token !== SYNC_SECRET) {
+    console.warn('🔒 Sync refusé: mauvais token');
     return res.status(401).json({ error: 'Unauthorized' });
   }
 
@@ -79,10 +104,9 @@ function syncJobs(req, res) {
     return res.status(400).json({ error: "Missing 'jobs' array" });
   }
 
-  // Lire les postes existants
-  const existing = readJobs();
+  // Construire un map des postes existants
   const existingMap = {};
-  (existing.jobs || []).forEach(j => {
+  (jobsCache.jobs || []).forEach(j => {
     if (j.id) existingMap[j.id] = j;
   });
 
@@ -93,7 +117,7 @@ function syncJobs(req, res) {
   incoming.jobs.forEach(job => {
     if (!job.id) return;
     if (existingMap[job.id]) {
-      // Mettre à jour last_seen
+      // Mettre à jour last_seen + champs
       existingMap[job.id].last_seen = now;
       existingMap[job.id].title = job.title || existingMap[job.id].title;
       existingMap[job.id].url = job.url || existingMap[job.id].url;
@@ -102,7 +126,6 @@ function syncJobs(req, res) {
       existingMap[job.id].type = job.type || existingMap[job.id].type;
       existingMap[job.id].metier = job.metier || existingMap[job.id].metier;
     } else {
-      // Nouveau poste
       existingMap[job.id] = {
         ...job,
         first_seen: job.first_seen || now,
@@ -112,19 +135,22 @@ function syncJobs(req, res) {
     }
   });
 
-  // Sauvegarder
-  const merged = {
+  // Sauvegarder en mémoire
+  jobsCache = {
     jobs: Object.values(existingMap),
     updated: now,
   };
-  writeJobs(merged);
+  lastSyncTime = now;
 
-  console.log(`📡 Sync: ${incoming.jobs.length} reçus, ${newCount} nouveaux, ${merged.jobs.length} total`);
+  // Sauvegarder sur disque (best-effort)
+  saveToDisk();
+
+  console.log(`📡 Sync: ${incoming.jobs.length} reçus, ${newCount} nouveaux, ${jobsCache.jobs.length} total en mémoire`);
 
   res.json({
     synced: incoming.jobs.length,
     new: newCount,
-    total: merged.jobs.length,
+    total: jobsCache.jobs.length,
     timestamp: now,
   });
 }
@@ -138,18 +164,32 @@ function expressInterest(req, res) {
     return res.status(400).json({ error: 'Missing body' });
   }
 
-  const interests = readInterests();
-  interests.push({
+  const entry = {
     job_title: data.job_title || '',
     job_hospital: data.job_hospital || '',
     candidate: data.candidate || {},
     timestamp: data.timestamp || new Date().toISOString(),
-  });
-  writeInterests(interests);
+  };
+
+  interestsCache.push(entry);
+  saveInterestsToDisk();
 
   console.log(`🤝 Intérêt: ${data.candidate?.metier || '?'} → ${data.job_title || '?'}`);
 
   res.json({ status: 'ok', message: 'Intérêt enregistré' });
+}
+
+// ═══════════════════════════════════════════════════════════════
+// ROUTE 4 : GET /health — Keep-alive pour UptimeRobot
+// ═══════════════════════════════════════════════════════════════
+function healthCheck(req, res) {
+  res.json({
+    status: 'ok',
+    uptime: Math.round(process.uptime()),
+    jobs_count: jobsCache.jobs.length,
+    last_sync: lastSyncTime,
+    server_start: serverStartTime,
+  });
 }
 
 // ═══════════════════════════════════════════════════════════════
@@ -159,5 +199,7 @@ module.exports = function (app) {
   app.get('/jobs', getJobs);
   app.post('/jobs/sync', syncJobs);
   app.post('/interest', expressInterest);
-  console.log('✅ Routes Jobs API chargées (/jobs, /jobs/sync, /interest)');
+  app.get('/health', healthCheck);
+  console.log('✅ Routes Jobs API v2 chargées (/jobs, /jobs/sync, /interest, /health)');
+  console.log(`   📊 ${jobsCache.jobs.length} postes en mémoire au démarrage`);
 };
