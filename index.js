@@ -543,6 +543,14 @@ app.post('/scan', upload.single('cv_file'), async (req, res) => {
     // ══════════════════════════════════════════════
     await sendCVLeadToMake(extracted, content.score, req.body.user_email);
 
+    // ══════════════════════════════════════════════════════════
+    // 🆕 TIER TAG — div caché pour le frontend Shopify
+    //    Le JS côté client lit ce div pour afficher le bon CTA
+    //    (VIP gratuit pour pépites/chauds, Pack 49€ pour le reste)
+    // ══════════════════════════════════════════════════════════
+    const qual = qualifyFromCV(extracted, content.score);
+    const tierTag = `<div id="sc-tier-data" data-tier="${qual.tier}" data-pct="${qual.pct}" data-email="${req.body.user_email || ''}" style="display:none"></div>`;
+
     // ── Réponse ──
     if (wantJson) {
       return res.json({
@@ -554,10 +562,11 @@ app.post('/scan', upload.single('cv_file'), async (req, res) => {
         missing_keywords: content.missing_keywords || [],
         recommendations: content.recommendations || [],
         email_status: emailMessage,
+        qualification: qual,
       });
     }
 
-    res.send(emailMessage + htmlReport);
+    res.send(emailMessage + htmlReport + tierTag);
 
   } catch (error) {
     console.error('❌ Erreur Backend:', error);
